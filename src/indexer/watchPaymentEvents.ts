@@ -2,52 +2,7 @@ import { publicClient } from "../chain/client.js";
 import { config } from "../config.js";
 import { prisma } from "../db/client.js";
 import { broadcast } from "../ws/broadcast.js";
-
-// Trimmed event ABI — just what this watcher needs. Swap for the real
-// compiled ABI once contracts are built and exported.
-const spendGuardEventsAbi = [
-  {
-    type: "event", name: "PaymentApproved",
-    inputs: [
-      { name: "requestId", type: "uint256", indexed: true },
-      { name: "agent", type: "address", indexed: true },
-      { name: "counterparty", type: "address", indexed: true },
-      { name: "amount", type: "uint256", indexed: false },
-    ],
-  },
-  {
-    type: "event", name: "PaymentBlocked",
-    inputs: [
-      { name: "agent", type: "address", indexed: true },
-      { name: "counterparty", type: "address", indexed: true },
-      { name: "amount", type: "uint256", indexed: false },
-      { name: "reason", type: "string", indexed: false },
-    ],
-  },
-  {
-    type: "event", name: "PaymentEscalated",
-    inputs: [
-      { name: "requestId", type: "uint256", indexed: true },
-      { name: "agent", type: "address", indexed: true },
-      { name: "counterparty", type: "address", indexed: true },
-      { name: "amount", type: "uint256", indexed: false },
-    ],
-  },
-  {
-    type: "event", name: "PendingApproved",
-    inputs: [
-      { name: "requestId", type: "uint256", indexed: true },
-      { name: "approver", type: "address", indexed: true },
-    ],
-  },
-  {
-    type: "event", name: "PendingRejected",
-    inputs: [
-      { name: "requestId", type: "uint256", indexed: true },
-      { name: "approver", type: "address", indexed: true },
-    ],
-  },
-] as const;
+import { spendGuardAbi } from "../chain/abis/spendGuard.js";
 
 /// Subscribes to every payment-lifecycle event SpendGuard emits, writes
 /// each one to the `events` table via Prisma, keeps `agents.spentToday`
@@ -58,7 +13,7 @@ export function watchPaymentEvents() {
 
   publicClient.watchContractEvent({
     address,
-    abi: spendGuardEventsAbi,
+    abi: spendGuardAbi,
     eventName: "PaymentApproved",
     onLogs: async (logs) => {
       for (const log of logs) {
@@ -88,7 +43,7 @@ export function watchPaymentEvents() {
 
   publicClient.watchContractEvent({
     address,
-    abi: spendGuardEventsAbi,
+    abi: spendGuardAbi,
     eventName: "PaymentBlocked",
     onLogs: async (logs) => {
       for (const log of logs) {
@@ -109,7 +64,7 @@ export function watchPaymentEvents() {
 
   publicClient.watchContractEvent({
     address,
-    abi: spendGuardEventsAbi,
+    abi: spendGuardAbi,
     eventName: "PaymentEscalated",
     onLogs: async (logs) => {
       for (const log of logs) {
@@ -135,7 +90,7 @@ export function watchPaymentEvents() {
 
   publicClient.watchContractEvent({
     address,
-    abi: spendGuardEventsAbi,
+    abi: spendGuardAbi,
     eventName: "PendingApproved",
     onLogs: async (logs) => {
       for (const log of logs) {
@@ -152,7 +107,7 @@ export function watchPaymentEvents() {
 
   publicClient.watchContractEvent({
     address,
-    abi: spendGuardEventsAbi,
+    abi: spendGuardAbi,
     eventName: "PendingRejected",
     onLogs: async (logs) => {
       for (const log of logs) {

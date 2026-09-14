@@ -15,9 +15,14 @@ import "../src/AuditLog.sol";
 import "../src/SpendGuard.sol";
 
 contract DeployScript is Script {
+    /// @dev Arc's canonical USDC ERC-20 interface (6 decimals). Override with
+    /// USDC_ADDRESS when deploying against a fork or another network.
+    address constant ARC_USDC = 0x3600000000000000000000000000000000000000;
+
     function run() external {
         uint256 deployerPrivateKey = vm.envUint("ADMIN_PRIVATE_KEY");
         address deployer = vm.addr(deployerPrivateKey);
+        address usdc = vm.envOr("USDC_ADDRESS", ARC_USDC);
 
         vm.startBroadcast(deployerPrivateKey);
 
@@ -27,11 +32,12 @@ contract DeployScript is Script {
         // Deploy AuditLog
         AuditLog auditLog = new AuditLog(deployer);
 
-        // Deploy SpendGuard with PolicyRegistry and AuditLog addresses
+        // Deploy SpendGuard with PolicyRegistry, AuditLog, and USDC addresses
         SpendGuard spendGuard = new SpendGuard(
             deployer,
             address(policyRegistry),
-            address(auditLog)
+            address(auditLog),
+            usdc
         );
 
         // Set up the contract relationships:

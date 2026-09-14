@@ -103,6 +103,9 @@ ARC_RPC_URL=https://arc-testnet.circle.com
 ARC_CHAIN_ID=1234567890 # Replace with actual Arc chain ID
 ADMIN_PRIVATE_KEY=0x... # Your admin wallet private key
 APPROVER_PRIVATE_KEY=0x... # Your approver wallet private key
+
+# Optional. Omit to use Arc's canonical USDC ERC-20 interface.
+USDC_ADDRESS=0x3600000000000000000000000000000000000000
 ```
 
 ### Deploy to Testnet
@@ -132,6 +135,8 @@ Source of truth for agent spending policies (daily caps, per-tx caps, escalation
 ### SpendGuard
 The gate every agent payment passes through. Checks policies, handles escalation, and records decisions. Has three main branches: approve, block, and escalate.
 
+Settlement is **non-custodial**: SpendGuard never holds agent funds. Each agent grants it a USDC allowance, and `_settle()` pulls the approved amount straight from the agent to the counterparty through Arc's canonical USDC ERC-20 interface (`0x3600…`, 6 decimals). If the allowance or balance is insufficient the transfer reverts, which reverts the whole request — including the `recordSpend()` that precedes it — so a payment is only ever recorded as spent once the money has actually moved.
+
 ### AuditLog
 Immutable record of every spend decision for compliance exports. Stores all approval, block, and escalation events.
 
@@ -140,6 +145,8 @@ Immutable record of every spend decision for compliance exports. Stores all appr
 - Uses Solidity ^0.8.24
 - Optimized with 200 runs
 - Designed for Arc chain (USDC as native gas)
+- Settlement uses Arc's USDC ERC-20 interface (6 decimals) so on-chain policy amounts match the amounts actually transferred; the native 18-decimal interface is not used
+- Non-custodial: agents fund their own balance and approve SpendGuard rather than depositing into it
 - No external dependencies - uses minimal custom AccessControl instead of OpenZeppelin
 - All tests include proper setup and teardown
 - Daily reset logic extensively tested (same day, new day, multiple days, day boundaries)

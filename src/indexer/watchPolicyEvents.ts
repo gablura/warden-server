@@ -2,26 +2,7 @@ import { publicClient } from "../chain/client.js";
 import { config } from "../config.js";
 import { prisma } from "../db/client.js";
 import { broadcast } from "../ws/broadcast.js";
-
-const policyRegistryEventsAbi = [
-  {
-    type: "event", name: "PolicySet",
-    inputs: [
-      { name: "agent", type: "address", indexed: true },
-      { name: "dailyCap", type: "uint256", indexed: false },
-      { name: "perTxCap", type: "uint256", indexed: false },
-      { name: "escalationThreshold", type: "uint256", indexed: false },
-    ],
-  },
-  {
-    type: "event", name: "AllowlistUpdated",
-    inputs: [
-      { name: "agent", type: "address", indexed: true },
-      { name: "counterparty", type: "address", indexed: true },
-      { name: "allowed", type: "bool", indexed: false },
-    ],
-  },
-] as const;
+import { policyRegistryAbi } from "../chain/abis/policyRegistry.js";
 
 /// Keeps the `agents` and `allowlist` tables current whenever an admin
 /// changes a policy on-chain, so the API never has to read the chain
@@ -31,7 +12,7 @@ export function watchPolicyEvents() {
 
   publicClient.watchContractEvent({
     address,
-    abi: policyRegistryEventsAbi,
+    abi: policyRegistryAbi,
     eventName: "PolicySet",
     onLogs: async (logs) => {
       for (const log of logs) {
@@ -71,7 +52,7 @@ export function watchPolicyEvents() {
 
   publicClient.watchContractEvent({
     address,
-    abi: policyRegistryEventsAbi,
+    abi: policyRegistryAbi,
     eventName: "AllowlistUpdated",
     onLogs: async (logs) => {
       for (const log of logs) {

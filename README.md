@@ -96,15 +96,28 @@ GET /health
 Returns server health status.
 
 ### Agents
+
+Both routes read caps and spend live from `PolicyRegistry` on every request.
+The `agents` rows are used only for dashboard metadata (label, status,
+timestamps) and payment history, because the indexed spend counter is never
+rolled over at the UTC day boundary and would report yesterday's total against
+today's cap. If the chain can't be read the route answers
+`503 { "error": "chain_unavailable" }` instead of falling back to stale values.
+
 ```http
 GET /agents
 ```
-Returns all agents ordered by spend amount.
+Returns all agents ordered by current on-chain spend. Each entry carries the
+live caps (`dailyCap`, `perTxCap`, `escalationThreshold`), `spentToday`,
+`remainingToday`, the UTC `currentDay` the counter applies to, `policyExists`
+(false when the registry has never seen the address), `policySource`, and the
+`blockNumber` all of those were read at.
 
 ```http
 GET /agents/:address
 ```
 Returns agent details with recent payment history (last 50 transactions).
+Addresses are matched case-insensitively.
 
 ### Policies (Admin)
 ```http

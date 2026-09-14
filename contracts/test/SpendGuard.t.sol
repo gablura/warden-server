@@ -11,13 +11,47 @@ import {SpendGuard} from "../src/SpendGuard.sol";
 import {PolicyRegistry} from "../src/PolicyRegistry.sol";
 import {AuditLog} from "../src/AuditLog.sol";
 
+/// @dev Minimal 6-decimal USDC stand-in for tests. Mirrors the parts of Arc's
+/// canonical USDC ERC-20 interface that SpendGuard depends on: a bool-returning
+/// transferFrom that enforces balance and allowance, plus max-allowance semantics.
+contract MockUSDC {
+    string public constant name = "USD Coin";
+    string public constant symbol = "USDC";
+    uint8 public constant decimals = 6;
+
+    mapping(address => uint256) public balanceOf;
+    mapping(address => mapping(address => uint256)) public allowance;
+
+    function mint(address to, uint256 amount) external {
+        balanceOf[to] += amount;
+    }
+
+    function approve(address spender, uint256 amount) external returns (bool) {
+        allowance[msg.sender][spender] = amount;
+        return true;
+    }
+
+    function transferFrom(address from, address to, uint256 amount) external returns (bool) {
+        require(balanceOf[from] >= amount, "MockUSDC: insufficient balance");
+        uint256 allowed = allowance[from][msg.sender];
+        require(allowed >= amount, "MockUSDC: insufficient allowance");
+        if (allowed != type(uint256).max) {
+            allowance[from][msg.sender] = allowed - amount;
+        }
+        balanceOf[from] -= amount;
+        balanceOf[to] += amount;
+        return true;
+    }
+}
+
 contract SpendGuardTest is Test {
     // TODO: After installing Foundry, change to: contract SpendGuardTest is Test {
-    
+
     SpendGuard public spendGuard;
     PolicyRegistry public policyRegistry;
     AuditLog public auditLog;
-    
+    MockUSDC public usdc;
+
     address public admin;
     address public approver;
     address public agent;
@@ -30,6 +64,9 @@ contract SpendGuardTest is Test {
     agent = address(0x2);
     counterparty = address(0x3);
 
+    // Deploy the USDC interface first — SpendGuard settles through it
+    usdc = new MockUSDC();
+
     // Deploy PolicyRegistry
     policyRegistry = new PolicyRegistry(admin);
 
@@ -40,7 +77,8 @@ contract SpendGuardTest is Test {
     spendGuard = new SpendGuard(
         admin,
         address(policyRegistry),
-        address(auditLog)
+        address(auditLog),
+        address(usdc)
     );
 
     // SpendGuard is the authorized guard for both contracts
@@ -59,6 +97,12 @@ contract SpendGuardTest is Test {
     );
 
     policyRegistry.setAllowlist(agent, counterparty, true);
+
+    // Fund the agent and grant SpendGuard the allowance the non-custodial
+    // settlement model pulls from.
+    usdc.mint(agent, 1_000_000 * 10**6);
+    vm.prank(agent);
+    usdc.approve(address(spendGuard), type(uint256).max);
 }
     // Test the approve branch (payment under threshold, allowlisted, within caps)
     function test_ApproveBranch_SmallPayment() public {
@@ -338,5 +382,94 @@ contract SpendGuardTest is Test {
         
         vm.prank(approver);
         spendGuard.rejectPending(requestId);
+    }
+
+    // --- Settlement / custody model ---
+
+    function test_Settle_TransfersFromAgentOnApproval() public {
+        uint256 amount = 25 * 10**6;
+        uint256 agentBalanceBefore = usdc.balanceOf(agent);
+
+        spendGuard.requestPayment(agent, counterparty, amount);
+
+        assertEq(usdc.balanceOf(counterparty), amount);
+        assertEq(usdc.balanceOf(agent), agentBalanceBefore - amount);
+    }
+
+    function test_Settle_EscalationDoesNotMoveFundsUntilApproved() public {
+        uint256 amount = 75 * 10**6;
+        uint256 agentBalanceBefore = usdc.balanceOf(agent);
+
+        uint256 requestId = spendGuard.requestPayment(agent, counterparty, amount);
+
+        // Escalated: nothing settled yet
+        assertEq(usdc.balanceOf(counterparty), 0);
+        assertEq(usdc.balanceOf(agent), agentBalanceBefore);
+
+        vm.prank(approver);
+        spendGuard.approvePending(requestId);
+
+        assertEq(usdc.balanceOf(counterparty), amount);
+        assertEq(usdc.balanceOf(agent), agentBalanceBefore - amount);
+    }
+
+    function test_Settle_RejectionMovesNothing() public {
+        uint256 amount = 75 * 10**6;
+        uint256 agentBalanceBefore = usdc.balanceOf(agent);
+
+        uint256 requestId = spendGuard.requestPayment(agent, counterparty, amount);
+
+        vm.prank(approver);
+        spendGuard.rejectPending(requestId);
+
+        assertEq(usdc.balanceOf(counterparty), 0);
+        assertEq(usdc.balanceOf(agent), agentBalanceBefore);
+    }
+
+    function test_Settle_BlockedPaymentMovesNothing() public {
+        uint256 amount = 25 * 10**6;
+        address unknownCounterparty = address(0x999);
+
+        spendGuard.requestPayment(agent, unknownCounterparty, amount);
+
+        assertEq(usdc.balanceOf(unknownCounterparty), 0);
+        assertEq(usdc.balanceOf(counterparty), 0);
+    }
+
+    function test_Settle_RevertWhen_AllowanceInsufficient() public {
+        vm.prank(agent);
+        usdc.approve(address(spendGuard), 0);
+
+        vm.expectRevert("MockUSDC: insufficient allowance");
+        spendGuard.requestPayment(agent, counterparty, 25 * 10**6);
+
+        // Fail-closed: the failed transfer reverted the whole request, so
+        // nothing was recorded as spent and nothing was audited.
+        (, , , uint256 spent, , ) = policyRegistry.policies(agent);
+        assertEq(spent, 0);
+        assertEq(auditLog.entryCount(), 0);
+    }
+
+    function test_Settle_RevertWhen_BalanceInsufficient() public {
+        address poorAgent = address(0x1234);
+        policyRegistry.setPolicy(poorAgent, 1000 * 10**6, 100 * 10**6, 50 * 10**6);
+        policyRegistry.setAllowlist(poorAgent, counterparty, true);
+        vm.prank(poorAgent);
+        usdc.approve(address(spendGuard), type(uint256).max);
+
+        vm.expectRevert("MockUSDC: insufficient balance");
+        spendGuard.requestPayment(poorAgent, counterparty, 25 * 10**6);
+
+        assertEq(usdc.balanceOf(counterparty), 0);
+    }
+
+    function test_Settle_ReducesAllowanceBySettledAmount() public {
+        uint256 amount = 40 * 10**6;
+        vm.prank(agent);
+        usdc.approve(address(spendGuard), 100 * 10**6);
+
+        spendGuard.requestPayment(agent, counterparty, amount);
+
+        assertEq(usdc.allowance(agent, address(spendGuard)), 60 * 10**6);
     }
 }

@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Exec(npm run)",
+      "Exec(ls)",
+      "Exec(dir)",
+      "Exec(forge init)",
+      "Exec(curl)",
+      "Exec(mkdir lib)",
+      "Exec(mkdir openzeppelin-contracts)"
+    ]
+  }
+}

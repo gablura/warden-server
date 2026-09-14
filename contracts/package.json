@@ -1,0 +1,19 @@
+{
+  "name": "@warden/contracts",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "build": "forge build",
+    "test": "forge test",
+    "test:gas": "forge test --gas-report",
+    "deploy": "forge script script/Deploy.s.sol --rpc-url $ARC_RPC_URL --private-key $ADMIN_PRIVATE_KEY --broadcast",
+    "deploy:testnet": "forge script script/Deploy.s.sol --rpc-url $ARC_TESTNET_RPC_URL --private-key $ADMIN_PRIVATE_KEY --broadcast --verify",
+    "clean": "forge clean"
+  },
+  "devDependencies": {
+    "foundry": "^1.0.0"
+  },
+  "dependencies": {
+    "dotenv": "^17.4.2"
+  }
+}

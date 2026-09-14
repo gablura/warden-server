@@ -1,0 +1,60 @@
+datasource db {
+  provider = "postgresql"
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+// USDC amounts are stored as raw on-chain base units (6 decimals) using
+// BigInt, not Decimal/Float — this avoids any floating-point precision
+// loss on values that come straight off the chain as uint256.
+
+model Agent {
+  address             String   @id
+  label               String?
+  dailyCap            BigInt   @map("daily_cap")
+  perTxCap            BigInt   @map("per_tx_cap")
+  escalationThreshold BigInt   @map("escalation_threshold")
+  spentToday          BigInt   @default(0) @map("spent_today")
+  status              String   @default("active")
+  createdAt           DateTime @default(now()) @map("created_at")
+  updatedAt           DateTime @updatedAt @map("updated_at")
+
+  @@map("agents")
+}
+
+model Event {
+  id           Int      @id @default(autoincrement())
+  agent        String
+  counterparty String
+  amount       BigInt
+  decision     String
+  timestamp    DateTime @default(now())
+  txHash       String   @map("tx_hash")
+
+  @@index([agent])
+  @@index([timestamp])
+  @@map("events")
+}
+
+model PendingRequest {
+  requestId    BigInt   @id @map("request_id")
+  agent        String
+  counterparty String
+  amount       BigInt
+  resolved     Boolean  @default(false)
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  @@index([resolved])
+  @@map("pending_requests")
+}
+
+model Allowlist {
+  agent        String
+  counterparty String
+  allowed      Boolean
+
+  @@id([agent, counterparty])
+  @@map("allowlist")
+}

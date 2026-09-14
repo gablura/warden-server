@@ -1,6 +1,7 @@
 import Fastify from "fastify";
 import cors from "@fastify/cors";
 import websocket from "@fastify/websocket";
+import rateLimit from "@fastify/rate-limit";
 import { config } from "./config.js";
 import { agentRoutes } from "./routes/agents.js";
 import { policyRoutes } from "./routes/policies.js";
@@ -14,7 +15,7 @@ const app = Fastify({ logger: true });
 
 await app.register(cors, { origin: config.CORS_ORIGIN });
 await app.register(websocket);
-
+await app.register(rateLimit, { max: 300, timeWindow: "1 minute" }); // Default rate limit for all routes
 // Dashboard clients connect here for live pushes (new payments, resolved
 // approvals) instead of polling the REST routes.
 app.register(async (scope) => {

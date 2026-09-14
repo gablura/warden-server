@@ -12,6 +12,10 @@ const schema = z.object({
   AUDIT_LOG_ADDRESS: z.string().startsWith("0x"),
   ADMIN_PRIVATE_KEY: z.string().startsWith("0x"),
   APPROVER_PRIVATE_KEY: z.string().startsWith("0x"),
+  // Separate from the chain keys above — these gate who's allowed to
+  // *ask* the server to sign an admin/approver transaction at all.
+  ADMIN_API_KEY: z.string().min(32, "ADMIN_API_KEY must be at least 32 characters"),
+  APPROVER_API_KEY: z.string().min(32, "APPROVER_API_KEY must be at least 32 characters"),
 });
 
 // Throws with a readable message on boot if anything's missing —

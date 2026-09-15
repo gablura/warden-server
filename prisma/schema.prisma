@@ -50,6 +50,32 @@ model PendingRequest {
   @@map("pending_requests")
 }
 
+model IndexerCheckpoint {
+  /// Last block this watcher fully processed (all its events applied).
+  /// On boot the watcher backfills from lastBlock + 1, so a restart can
+  /// never silently skip events. Blocks with a failed event hold the
+  /// checkpoint back until they process cleanly.
+  watcher   String @id
+  lastBlock BigInt @map("last_block")
+
+  @@map("indexer_checkpoints")
+}
+
+/// Idempotency marker for indexer event processing: one row per (tx, log
+/// index), inserted before any side effect. A unique violation here means
+/// the event was already applied — so re-running a backfill or replaying a
+/// block range can never double-increment spentToday or duplicate audit
+/// rows. Rows are tiny and append-only per on-chain event.
+model ProcessedLog {
+  txHash      String   @map("tx_hash")
+  logIndex    Int      @map("log_index")
+  watcher     String
+  processedAt DateTime @default(now()) @map("processed_at")
+
+  @@id([txHash, logIndex])
+  @@map("processed_logs")
+}
+
 model OperatorAction {
   id            Int      @id @default(autoincrement())
   operatorId    String   @map("operator_id")

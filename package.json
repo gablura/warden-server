@@ -9,6 +9,7 @@
     "start": "node dist/server.js",
     "postinstall": "prisma generate",
     "abis:generate": "node scripts/generate-abis.mjs",
+    "keys:generate": "node scripts/generate-api-keys.mjs",
     "db:migrate": "prisma migrate dev",
     "db:studio": "prisma studio"
   },

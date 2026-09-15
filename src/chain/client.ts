@@ -39,5 +39,6 @@ export const policyRegistry = {
 };
 
 export const spendGuard = {
+  read: getContract({ address: config.SPEND_GUARD_ADDRESS as `0x${string}`, abi: spendGuardAbi, client: publicClient }),
   approver: getContract({ address: config.SPEND_GUARD_ADDRESS as `0x${string}`, abi: spendGuardAbi, client: approverWalletClient }),
 };

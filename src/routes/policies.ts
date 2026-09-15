@@ -1,6 +1,7 @@
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { policyRegistry } from "../chain/client.js";
+import { serializeTx } from "../chain/txQueue.js";
 import { prisma } from "../db/client.js";
 import { requireRole } from "../auth/apiKeyAuth.js";
 
@@ -50,9 +51,13 @@ export async function policyRoutes(app: FastifyInstance) {
   app.post("/policies", gasSpendingRoute, async (req, reply) => {
     if (!req.operator) return reply.code(500).send({ error: "internal_error", message: "operator identity missing" });
     const body = setPolicyBody.parse(req.body);
-    const hash = await policyRegistry.admin.write.setPolicy([
-      body.agent as `0x${string}`, body.dailyCap, body.perTxCap, body.escalationThreshold,
-    ]);
+    // Serialized per wallet (see txQueue.ts) so two concurrent admin calls
+    // can't collide on the same nonce.
+    const hash = await serializeTx("admin", () =>
+      policyRegistry.admin.write.setPolicy([
+        body.agent as `0x${string}`, body.dailyCap, body.perTxCap, body.escalationThreshold,
+      ]),
+    );
     await recordOperatorAction(req.operator, "set_policy", body.agent.toLowerCase(), hash);
     return reply.send({ txHash: hash });
   });
@@ -60,9 +65,11 @@ export async function policyRoutes(app: FastifyInstance) {
   app.post("/policies/allowlist", gasSpendingRoute, async (req, reply) => {
     if (!req.operator) return reply.code(500).send({ error: "internal_error", message: "operator identity missing" });
     const body = setAllowlistBody.parse(req.body);
-    const hash = await policyRegistry.admin.write.setAllowlist([
-      body.agent as `0x${string}`, body.counterparty as `0x${string}`, body.allowed,
-    ]);
+    const hash = await serializeTx("admin", () =>
+      policyRegistry.admin.write.setAllowlist([
+        body.agent as `0x${string}`, body.counterparty as `0x${string}`, body.allowed,
+      ]),
+    );
     await recordOperatorAction(req.operator, "set_allowlist", `${body.agent.toLowerCase()}:${body.counterparty.toLowerCase()}`, hash);
     return reply.send({ txHash: hash });
   });

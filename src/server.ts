@@ -10,6 +10,7 @@ import { approvalRoutes } from "./routes/approvals.js";
 import { auditRoutes } from "./routes/audit.js";
 import { registerClient } from "./ws/broadcast.js";
 import { setAuthAlertLogger } from "./auth/failureAlert.js";
+import { acquireIndexerLeadership } from "./indexer/leader.js";
 import { watchPaymentEvents } from "./indexer/watchPaymentEvents.js";
 import { watchPolicyEvents } from "./indexer/watchPolicyEvents.js";
 
@@ -83,12 +84,21 @@ await app.register(auditRoutes);
 
 app.get("/health", async () => ({ ok: true }));
 
-// Start the chain event indexers
+// Start the chain event indexers. A Postgres advisory lock elects a single
+// watcher instance — with more than one replica, every other replica skips
+// starting its watchers instead of processing every event multiple times
+// (which would multiply spend totals and duplicate audit rows).
 app.log.info("Starting chain event indexers...");
 try {
-  watchPaymentEvents();
-  watchPolicyEvents();
-  app.log.info("Chain event indexers started successfully");
+  const isLeader = await acquireIndexerLeadership();
+  if (isLeader) {
+    // Each watcher backfills from its persisted checkpoint before going
+    // live, so a restart resumes instead of skipping events.
+    await Promise.all([watchPaymentEvents(), watchPolicyEvents()]);
+    app.log.info("Chain event indexers started successfully (this instance holds the indexer lock)");
+  } else {
+    app.log.warn("Another instance holds the indexer lock — running API-only, no watchers started");
+  }
 } catch (err) {
   app.log.error({ err }, "Failed to start chain event indexers");
   // Continue running the server even if indexers fail - the API will still work

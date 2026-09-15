@@ -30,10 +30,12 @@ contract AccessControlLite {
     }
 
     constructor(address admin_) {
+        require(admin_ != address(0), "admin cannot be zero address");
         admin = admin_;
     }
 
     function transferAdmin(address newAdmin) external onlyAdmin {
+        require(newAdmin != address(0), "admin cannot be zero address");
         emit AdminTransferred(admin, newAdmin);
         admin = newAdmin;
     }

@@ -39,8 +39,8 @@ interface IERC20 {
 /// stay possible while paused — emptying the queue is safe and lets
 /// approvers clean up during an incident; only money movement freezes.
 contract SpendGuard is AccessControlLite, ReentrancyGuard {
-    IPolicyRegistry public registry;
-    IAuditLog public auditLog;
+    IPolicyRegistry public immutable registry;
+    IAuditLog public immutable auditLog;
     /// @notice USDC ERC-20 interface used to settle approved payments.
     IERC20 public immutable usdc;
 

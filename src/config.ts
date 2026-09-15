@@ -1,5 +1,8 @@
 import "dotenv/config";
 import { z } from "zod";
+import { isAddress } from "viem";
+
+const address = z.string().refine((v) => isAddress(v), "invalid EVM address");
 
 const schema = z.object({
   PORT: z.coerce.number().default(4000),
@@ -7,9 +10,9 @@ const schema = z.object({
   ARC_RPC_URL: z.string().url(),
   ARC_CHAIN_ID: z.coerce.number(),
   DATABASE_URL: z.string(),
-  POLICY_REGISTRY_ADDRESS: z.string().startsWith("0x"),
-  SPEND_GUARD_ADDRESS: z.string().startsWith("0x"),
-  AUDIT_LOG_ADDRESS: z.string().startsWith("0x"),
+  POLICY_REGISTRY_ADDRESS: address,
+  SPEND_GUARD_ADDRESS: address,
+  AUDIT_LOG_ADDRESS: address,
   ADMIN_PRIVATE_KEY: z.string().startsWith("0x"),
   APPROVER_PRIVATE_KEY: z.string().startsWith("0x"),
   // Separate from the chain keys above — these gate who's allowed to
@@ -19,8 +22,12 @@ const schema = z.object({
   // here so the legacy keys can be retired once the registry is in place.
   ADMIN_API_KEY: z.string().min(32, "ADMIN_API_KEY must be at least 32 characters").optional(),
   APPROVER_API_KEY: z.string().min(32, "APPROVER_API_KEY must be at least 32 characters").optional(),
-  // Named API credentials, format (comma-separated): role:label:key[:maxApproval]
+  // Named API credentials, format (comma-separated):
+  //   role:label:key[:previousKey][:maxApproval]
   // e.g. approver:alice:9f1c...:5000000000,admin:bob:ab12...
+  // For key rotation: set previousKey to the old key. Both current and
+  // previous key are accepted during the rotation window. Remove
+  // previousKey once all clients have migrated.
   // When set, these replace the legacy keys above entirely.
   WARDEN_API_KEYS: z.string().optional(),
 }).superRefine((cfg, ctx) => {

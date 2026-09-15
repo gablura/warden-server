@@ -87,10 +87,12 @@ model OperatorAction {
   action        String
   subjectId     String   @map("subject_id")
   txHash        String?  @map("tx_hash")
+  correlationId String?  @map("correlation_id")
   createdAt     DateTime @default(now()) @map("created_at")
 
   @@index([createdAt])
   @@index([operatorId])
+  @@index([correlationId])
   @@map("operator_actions")
 }
 

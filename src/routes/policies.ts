@@ -1,22 +1,26 @@
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
+import { isAddress } from "viem";
 import { policyRegistry } from "../chain/client.js";
 import { serializeTx } from "../chain/txQueue.js";
 import { prisma } from "../db/client.js";
 import { requireRole } from "../auth/apiKeyAuth.js";
+import { getCorrelationId } from "../auth/correlation.js";
+
+const addressField = z.string().refine((v) => isAddress(v), "invalid EVM address");
 
 const setPolicyBody = z.object({
-  agent: z.string().startsWith("0x"),
+  agent: addressField,
   dailyCap: z.coerce.bigint(),
   perTxCap: z.coerce.bigint(),
   escalationThreshold: z.coerce.bigint(),
-});
+}).strict();
 
 const setAllowlistBody = z.object({
-  agent: z.string().startsWith("0x"),
-  counterparty: z.string().startsWith("0x"),
+  agent: addressField,
+  counterparty: addressField,
   allowed: z.boolean(),
-});
+}).strict();
 
 // Both routes require the admin x-api-key (see auth/apiKeyAuth.ts) and
 // are rate-limited independently of the server-wide default, since
@@ -43,6 +47,7 @@ async function recordOperatorAction(
       action,
       subjectId,
       txHash,
+      correlationId: getCorrelationId() ?? null,
     },
   });
 }
@@ -59,7 +64,7 @@ export async function policyRoutes(app: FastifyInstance) {
       ]),
     );
     await recordOperatorAction(req.operator, "set_policy", body.agent.toLowerCase(), hash);
-    return reply.send({ txHash: hash });
+    return reply.send({ txHash: hash, correlationId: req.correlationId });
   });
 
   app.post("/policies/allowlist", gasSpendingRoute, async (req, reply) => {
@@ -71,6 +76,6 @@ export async function policyRoutes(app: FastifyInstance) {
       ]),
     );
     await recordOperatorAction(req.operator, "set_allowlist", `${body.agent.toLowerCase()}:${body.counterparty.toLowerCase()}`, hash);
-    return reply.send({ txHash: hash });
+    return reply.send({ txHash: hash, correlationId: req.correlationId });
   });
 }

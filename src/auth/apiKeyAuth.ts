@@ -2,6 +2,7 @@ import type { FastifyReply, FastifyRequest } from "fastify";
 import { findCredential } from "./credentials.js";
 import { verifyRequestSignature, type SignatureFailure } from "./requestSignature.js";
 import { recordAuthFailure } from "./failureAlert.js";
+import { generateCorrelationId, runWithCorrelation } from "./correlation.js";
 
 /// Auth middleware for the admin/approver write routes.
 ///
@@ -31,6 +32,9 @@ function signatureRejection(req: FastifyRequest, reply: FastifyReply, role: stri
 ///   app.post("/policies", { preHandler: requireRole("admin") }, handler)
 export function requireRole(role: "admin" | "approver") {
   return async function requireRoleHandler(req: FastifyRequest, reply: FastifyReply) {
+    const correlationId = generateCorrelationId();
+    req.correlationId = correlationId;
+
     const provided = req.headers["x-api-key"];
 
     if (typeof provided !== "string" || provided.length === 0) {

@@ -8,6 +8,7 @@ import { agentRoutes } from "./routes/agents.js";
 import { policyRoutes } from "./routes/policies.js";
 import { approvalRoutes } from "./routes/approvals.js";
 import { auditRoutes } from "./routes/audit.js";
+import { statusRoutes } from "./routes/status.js";
 import { registerClient } from "./ws/broadcast.js";
 import { setAuthAlertLogger } from "./auth/failureAlert.js";
 import { acquireIndexerLeadership } from "./indexer/leader.js";
@@ -81,6 +82,7 @@ await app.register(agentRoutes);
 await app.register(policyRoutes);
 await app.register(approvalRoutes);
 await app.register(auditRoutes);
+await app.register(statusRoutes);
 
 app.get("/health", async () => ({ ok: true }));
 

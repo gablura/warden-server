@@ -1,11 +1,12 @@
 import type { FastifyInstance } from "fastify";
 import { prisma, serializeBigInts } from "../db/client.js";
-import { spendGuard } from "../chain/client.js";
+import { spendGuard, publicClient } from "../chain/client.js";
 import { serializeTx } from "../chain/txQueue.js";
 import { readAgentPolicies } from "../chain/policyState.js";
 import { broadcast } from "../ws/broadcast.js";
 import { requireRole } from "../auth/apiKeyAuth.js";
 import { limitQuerySchema, paginatedQuery } from "../db/pagination.js";
+import { getCorrelationId } from "../auth/correlation.js";
 
 // Same shape as policies.ts's gas-spending routes — approver key required,
 // tight rate limit, since these send real transactions.
@@ -57,15 +58,26 @@ export async function approvalRoutes(app: FastifyInstance) {
   app.get<{ Querystring: { limit?: string } }>("/approvals", async (req) => {
     const { limit } = limitQuerySchema.parse(req.query);
 
-    const result = await paginatedQuery(
-      (take) =>
-        prisma.pendingRequest.findMany({
-          where: { resolved: false },
-          orderBy: { createdAt: "asc" },
-          take,
-        }),
-      limit,
-    );
+    // Fetch pending requests, indexer checkpoint, and chain head in parallel.
+    // The checkpoint tells us how far behind the indexer is; if it's lagging,
+    // some "pending" requests may already be resolved on-chain — the staleRead
+    // flag surfaces this so the frontend can warn before a wasted-gas revert.
+    const [result, checkpoint, chainHead] = await Promise.all([
+      paginatedQuery(
+        (take) =>
+          prisma.pendingRequest.findMany({
+            where: { resolved: false },
+            orderBy: { createdAt: "asc" },
+            take,
+          }),
+        limit,
+      ),
+      prisma.indexerCheckpoint.findUnique({ where: { watcher: "payments:PaymentApproved" } }),
+      publicClient.getBlockNumber().catch(() => 0n),
+    ]);
+
+    const indexerLag = checkpoint ? Number(chainHead - checkpoint.lastBlock) : null;
+    const staleRead = indexerLag !== null && indexerLag > 0;
 
     // Make the daily-cap collision visible before anyone clicks approve.
     // On-chain, an escalated request only touches spentToday at approval
@@ -96,7 +108,7 @@ export async function approvalRoutes(app: FastifyInstance) {
       };
     });
 
-    return serializeBigInts({ data: enriched, hasMore: result.hasMore });
+    return serializeBigInts({ data: enriched, hasMore: result.hasMore, staleRead, indexerLag });
   });
 
   app.post<{ Params: { id: string } }>("/approvals/:id/approve", gasSpendingRoute, async (req, reply) => {
@@ -116,7 +128,7 @@ export async function approvalRoutes(app: FastifyInstance) {
       });
       await recordOperatorAction(req.operator, "approve", req.params.id, hash);
       broadcast({ type: "approval_resolved", requestId: req.params.id, decision: "approved", txHash: hash, by: req.operator.id });
-      return reply.send({ txHash: hash });
+      return reply.send({ txHash: hash, correlationId: req.correlationId });
     } catch (err) {
       if (err instanceof AlreadyResolvedError) {
         return reply.code(409).send({ error: "already_resolved", message: "this request was already resolved on-chain" });
@@ -136,7 +148,7 @@ export async function approvalRoutes(app: FastifyInstance) {
       });
       await recordOperatorAction(req.operator, "reject", req.params.id, hash);
       broadcast({ type: "approval_resolved", requestId: req.params.id, decision: "rejected", txHash: hash, by: req.operator.id });
-      return reply.send({ txHash: hash });
+      return reply.send({ txHash: hash, correlationId: req.correlationId });
     } catch (err) {
       if (err instanceof AlreadyResolvedError) {
         return reply.code(409).send({ error: "already_resolved", message: "this request was already resolved on-chain" });
@@ -165,6 +177,7 @@ async function recordOperatorAction(
       action,
       subjectId,
       txHash,
+      correlationId: getCorrelationId() ?? null,
     },
   });
 }

@@ -47,7 +47,11 @@ export async function agentRoutes(app: FastifyInstance) {
 
     const policies = await readAgentPolicies(result.data.map((agent) => normalizeAddress(agent.address)));
 
-    const enriched = result.data.map((agent, index) => withLivePolicy(agent, policies[index]!));
+    const enriched = result.data.map((agent, index) => {
+      const policy = withLivePolicy(agent, policies[index]!);
+      const spentPct = policy.dailyCap > 0n ? Number((policy.spentToday * 100n) / policy.dailyCap) : 0;
+      return { ...policy, nearCap: spentPct >= 80 };
+    });
 
     // Sorted on live spend — the old `orderBy: { spentToday: "desc" }` sorted on
     // a column this route no longer trusts.

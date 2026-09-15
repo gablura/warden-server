@@ -45,7 +45,11 @@ tmp/
 temp/
 .cache/
 
+*.devin/
+.devin/*
+
 # OS
 .DS_Store
 Thumbs.db
 WARDEN_PROJECT_BRIEF.md
+WARDEN_HARDENING_REVIEW.md

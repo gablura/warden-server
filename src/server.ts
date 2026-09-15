@@ -9,6 +9,7 @@ import { policyRoutes } from "./routes/policies.js";
 import { approvalRoutes } from "./routes/approvals.js";
 import { auditRoutes } from "./routes/audit.js";
 import { registerClient } from "./ws/broadcast.js";
+import { setAuthAlertLogger } from "./auth/failureAlert.js";
 import { watchPaymentEvents } from "./indexer/watchPaymentEvents.js";
 import { watchPolicyEvents } from "./indexer/watchPolicyEvents.js";
 
@@ -23,6 +24,19 @@ function errorFields(err: unknown) {
 }
 
 const app = Fastify({ logger: true });
+
+// Auth-failure bursts log through the app's pino logger (see failureAlert.ts).
+setAuthAlertLogger((obj, msg) => app.log.error(obj, msg));
+
+// WebSocket handshakes are not covered by the CORS plugin — same-origin
+// policy does not gate the upgrade request, so any page in any browser could
+// otherwise open a socket to /ws and read the live payment feed. The origin
+// check below is the WS equivalent of the CORS config and must list the same
+// origins. Missing Origin (server-to-server clients, curl) is allowed; a
+// *mismatched* Origin is a browser and gets dropped.
+const allowedOrigins = new Set(
+  config.CORS_ORIGIN.split(",").map((o) => o.trim()).filter(Boolean),
+);
 
 await app.register(cors, { origin: config.CORS_ORIGIN });
 await app.register(websocket);
@@ -51,7 +65,15 @@ app.setErrorHandler((err, req, reply) => {
 // Dashboard clients connect here for live pushes (new payments, resolved
 // approvals) instead of polling the REST routes.
 app.register(async (scope) => {
-  scope.get("/ws", { websocket: true }, (socket) => registerClient(socket));
+  scope.get("/ws", { websocket: true }, (socket, req) => {
+    const origin = req.headers.origin;
+    if (origin !== undefined && !allowedOrigins.has(origin)) {
+      scope.log.warn({ origin, ip: req.ip }, "rejected websocket upgrade from disallowed origin");
+      socket.close(1008, "origin not allowed");
+      return;
+    }
+    registerClient(socket);
+  });
 });
 
 await app.register(agentRoutes);

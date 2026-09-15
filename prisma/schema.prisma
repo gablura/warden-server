@@ -50,6 +50,21 @@ model PendingRequest {
   @@map("pending_requests")
 }
 
+model OperatorAction {
+  id            Int      @id @default(autoincrement())
+  operatorId    String   @map("operator_id")
+  operatorLabel String   @map("operator_label")
+  role          String
+  action        String
+  subjectId     String   @map("subject_id")
+  txHash        String?  @map("tx_hash")
+  createdAt     DateTime @default(now()) @map("created_at")
+
+  @@index([createdAt])
+  @@index([operatorId])
+  @@map("operator_actions")
+}
+
 model Allowlist {
   agent        String
   counterparty String

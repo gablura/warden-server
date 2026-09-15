@@ -2,6 +2,7 @@ import type { FastifyInstance } from "fastify";
 import type { Agent } from "@prisma/client";
 import { prisma, serializeBigInts } from "../db/client.js";
 import { readAgentPolicies, readAgentPolicy, type AgentPolicySnapshot } from "../chain/policyState.js";
+import { limitQuerySchema, paginatedQuery, cursorQuerySchema, cursorPaginatedQuery, cursorWhere, encodeCursor } from "../db/pagination.js";
 
 // EVM addresses are case-insensitive; checksum casing is a display convention.
 // The indexer stores the lowercase form it gets from the event args, so
@@ -36,20 +37,26 @@ function withLivePolicy(agent: Agent, policy: AgentPolicySnapshot) {
 }
 
 export async function agentRoutes(app: FastifyInstance) {
-  app.get("/agents", async () => {
-    const agents = await prisma.agent.findMany();
-    const policies = await readAgentPolicies(agents.map((agent) => normalizeAddress(agent.address)));
+  app.get<{ Querystring: { limit?: string } }>("/agents", async (req) => {
+    const { limit } = limitQuerySchema.parse(req.query);
 
-    const enriched = agents.map((agent, index) => withLivePolicy(agent, policies[index]!));
+    const result = await paginatedQuery(
+      (take) => prisma.agent.findMany({ take }),
+      limit,
+    );
+
+    const policies = await readAgentPolicies(result.data.map((agent) => normalizeAddress(agent.address)));
+
+    const enriched = result.data.map((agent, index) => withLivePolicy(agent, policies[index]!));
 
     // Sorted on live spend — the old `orderBy: { spentToday: "desc" }` sorted on
     // a column this route no longer trusts.
     enriched.sort((a, b) => (b.spentToday > a.spentToday ? 1 : b.spentToday < a.spentToday ? -1 : 0));
 
-    return serializeBigInts(enriched);
+    return serializeBigInts({ data: enriched, hasMore: result.hasMore });
   });
 
-  app.get<{ Params: { address: string } }>("/agents/:address", async (req, reply) => {
+  app.get<{ Params: { address: string }; Querystring: { limit?: string; cursor?: string } }>("/agents/:address", async (req, reply) => {
     const address = normalizeAddress(req.params.address);
 
     const agent = await prisma.agent.findUnique({ where: { address } });
@@ -59,9 +66,24 @@ export async function agentRoutes(app: FastifyInstance) {
     // error handler in server.ts) rather than answering with indexed values.
     const [policy, recentPayments] = await Promise.all([
       readAgentPolicy(address),
-      prisma.event.findMany({ where: { agent: address }, orderBy: { timestamp: "desc" }, take: 50 }),
+      cursorPaginatedQuery(
+        (take, cursor) =>
+          prisma.event.findMany({
+            where: { agent: address, ...(cursor ? cursorWhere(cursor, "desc") : {}) },
+            orderBy: [{ timestamp: "desc" }, { id: "desc" }],
+            take,
+          }),
+        req.query,
+      ),
     ]);
 
-    return serializeBigInts({ agent: withLivePolicy(agent, policy), recentPayments });
+    const last = recentPayments.data[recentPayments.data.length - 1];
+    return serializeBigInts({
+      agent: withLivePolicy(agent, policy),
+      recentPayments: {
+        ...recentPayments,
+        nextCursor: recentPayments.hasMore && last ? encodeCursor(last.id, last.timestamp) : null,
+      },
+    });
   });
 }

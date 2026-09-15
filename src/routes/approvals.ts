@@ -5,6 +5,7 @@ import { serializeTx } from "../chain/txQueue.js";
 import { readAgentPolicies } from "../chain/policyState.js";
 import { broadcast } from "../ws/broadcast.js";
 import { requireRole } from "../auth/apiKeyAuth.js";
+import { limitQuerySchema, paginatedQuery } from "../db/pagination.js";
 
 // Same shape as policies.ts's gas-spending routes — approver key required,
 // tight rate limit, since these send real transactions.
@@ -53,11 +54,18 @@ async function ensureUnresolved(requestId: bigint) {
 }
 
 export async function approvalRoutes(app: FastifyInstance) {
-  app.get("/approvals", async () => {
-    const pending = await prisma.pendingRequest.findMany({
-      where: { resolved: false },
-      orderBy: { createdAt: "asc" },
-    });
+  app.get<{ Querystring: { limit?: string } }>("/approvals", async (req) => {
+    const { limit } = limitQuerySchema.parse(req.query);
+
+    const result = await paginatedQuery(
+      (take) =>
+        prisma.pendingRequest.findMany({
+          where: { resolved: false },
+          orderBy: { createdAt: "asc" },
+          take,
+        }),
+      limit,
+    );
 
     // Make the daily-cap collision visible before anyone clicks approve.
     // On-chain, an escalated request only touches spentToday at approval
@@ -67,12 +75,12 @@ export async function approvalRoutes(app: FastifyInstance) {
     // createdAt order: a request fits if spentToday plus its own amount
     // plus everything queued ahead of it stays under the live daily cap.
     // Live caps/spend come from the same multicall path /agents uses.
-    const agents = [...new Set(pending.map((r) => r.agent))];
+    const agents = [...new Set(result.data.map((r) => r.agent))];
     const policies = await readAgentPolicies(agents);
     const policyByAgent = new Map(agents.map((agent, i) => [agent, policies[i]!]));
 
     const reserved = new Map<string, bigint>(); // agent -> amount queued ahead
-    const enriched = pending.map((request) => {
+    const enriched = result.data.map((request) => {
       const policy = policyByAgent.get(request.agent)!;
       const ahead = reserved.get(request.agent) ?? 0n;
       reserved.set(request.agent, ahead + request.amount);
@@ -88,7 +96,7 @@ export async function approvalRoutes(app: FastifyInstance) {
       };
     });
 
-    return serializeBigInts(enriched);
+    return serializeBigInts({ data: enriched, hasMore: result.hasMore });
   });
 
   app.post<{ Params: { id: string } }>("/approvals/:id/approve", gasSpendingRoute, async (req, reply) => {

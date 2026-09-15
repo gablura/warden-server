@@ -35,6 +35,8 @@ model Event {
 
   @@index([agent])
   @@index([timestamp])
+  @@index([agent, timestamp])
+  @@index([timestamp, id])
   @@map("events")
 }
 
@@ -47,6 +49,7 @@ model PendingRequest {
   createdAt    DateTime @default(now()) @map("created_at")
 
   @@index([resolved])
+  @@index([resolved, createdAt])
   @@map("pending_requests")
 }
 

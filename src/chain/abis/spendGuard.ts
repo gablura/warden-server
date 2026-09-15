@@ -120,6 +120,19 @@ export const spendGuardAbi = [
   },
   {
     "type": "function",
+    "name": "paused",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "bool",
+        "internalType": "bool"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "pending",
     "inputs": [
       {
@@ -245,6 +258,19 @@ export const spendGuardAbi = [
   },
   {
     "type": "function",
+    "name": "setPaused",
+    "inputs": [
+      {
+        "name": "value",
+        "type": "bool",
+        "internalType": "bool"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
     "name": "transferAdmin",
     "inputs": [
       {
@@ -319,6 +345,19 @@ export const spendGuardAbi = [
       },
       {
         "name": "allowed",
+        "type": "bool",
+        "indexed": false,
+        "internalType": "bool"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "PauseSet",
+    "inputs": [
+      {
+        "name": "paused",
         "type": "bool",
         "indexed": false,
         "internalType": "bool"
@@ -456,5 +495,15 @@ export const spendGuardAbi = [
       }
     ],
     "anonymous": false
+  },
+  {
+    "type": "error",
+    "name": "ContractPaused",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "ReentrantCall",
+    "inputs": []
   }
 ] as const;

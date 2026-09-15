@@ -2,6 +2,7 @@
 pragma solidity ^0.8.24;
 
 import "./AccessControlLite.sol";
+import "./ReentrancyGuard.sol";
 
 interface IPolicyRegistry {
     function checkPolicy(address agent, address counterparty, uint256 amount)
@@ -32,11 +33,20 @@ interface IERC20 {
 /// Custody model: non-custodial. SpendGuard never holds agent funds — it is
 /// granted a USDC allowance by each agent and pulls settlement straight from
 /// the agent's balance to the counterparty. See _settle() below.
-contract SpendGuard is AccessControlLite {
+///
+/// Emergency pause: the admin can freeze all settlement immediately
+/// (setPaused) without a redeploy if a bug or exploit is found. Rejections
+/// stay possible while paused — emptying the queue is safe and lets
+/// approvers clean up during an incident; only money movement freezes.
+contract SpendGuard is AccessControlLite, ReentrancyGuard {
     IPolicyRegistry public registry;
     IAuditLog public auditLog;
     /// @notice USDC ERC-20 interface used to settle approved payments.
     IERC20 public immutable usdc;
+
+    bool public paused;
+
+    event PauseSet(bool paused);
 
     struct PendingRequest {
         address agent;
@@ -54,16 +64,39 @@ contract SpendGuard is AccessControlLite {
     event PendingApproved(uint256 indexed requestId, address indexed approver);
     event PendingRejected(uint256 indexed requestId, address indexed approver);
 
+    error ContractPaused();
+
+    modifier whenNotPaused() {
+        if (paused) revert ContractPaused();
+        _;
+    }
+
     constructor(address admin_, address registry_, address auditLog_, address usdc_) AccessControlLite(admin_) {
         registry = IPolicyRegistry(registry_);
         auditLog = IAuditLog(auditLog_);
         usdc = IERC20(usdc_);
     }
 
+    /// @notice Freeze/unfreeze all settlement. Admin-only, immediate.
+    function setPaused(bool value) external onlyAdmin {
+        paused = value;
+        emit PauseSet(value);
+    }
+
     /// @notice Entry point for an agent (or its relayer) to move USDC.
     /// Returns 0 if the payment settled immediately or was blocked;
     /// returns a nonzero requestId if it's sitting in the approval queue.
-    function requestPayment(address agent, address counterparty, uint256 amount) external returns (uint256 requestId) {
+    ///
+    /// nonReentrant: this makes external calls (USDC transferFrom, AuditLog
+    /// record), and transferFrom hands control to arbitrary code on
+    /// callback-capable tokens — a reentrant requestPayment here could
+    /// otherwise double-move funds inside one settlement.
+    function requestPayment(address agent, address counterparty, uint256 amount)
+        external
+        nonReentrant
+        whenNotPaused
+        returns (uint256 requestId)
+    {
         (bool allowed, bool needsApproval, string memory reason) = registry.checkPolicy(agent, counterparty, amount);
 
         if (!allowed) {
@@ -87,7 +120,11 @@ contract SpendGuard is AccessControlLite {
         return 0;
     }
 
-    function approvePending(uint256 requestId) external onlyApprover {
+    /// @notice nonReentrant for the same reason as requestPayment — recordSpend
+    /// (registry call) and _settle (USDC transfer) both cross contract
+    /// boundaries before this function's effects are fully done. Also paused
+    /// with everything else that moves money.
+    function approvePending(uint256 requestId) external onlyApprover nonReentrant whenNotPaused {
         PendingRequest storage r = pending[requestId];
         require(!r.resolved, "already resolved");
         r.resolved = true;
@@ -100,7 +137,10 @@ contract SpendGuard is AccessControlLite {
         emit PaymentApproved(requestId, r.agent, r.counterparty, r.amount);
     }
 
-    function rejectPending(uint256 requestId) external onlyApprover {
+    /// Deliberately NOT whenNotPaused: rejection moves no money, so it stays
+    /// available while paused, letting approvers empty the queue during an
+    /// incident instead of leaving requests stranded.
+    function rejectPending(uint256 requestId) external onlyApprover nonReentrant {
         PendingRequest storage r = pending[requestId];
         require(!r.resolved, "already resolved");
         r.resolved = true;

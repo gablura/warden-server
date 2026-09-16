@@ -53,6 +53,64 @@ export interface Deployment extends ChainClients {
   auditLog: `0x${string}`;
 }
 
+/// Stable identifier for a deployment, used to scope DB rows that would
+/// otherwise collide across deployments: pending requests (on-chain request
+/// ids are per-deployment counters) and indexer checkpoints (blocks are
+/// per-chain). Processed-log claims are deliberately NOT keyed by
+/// deployment: (txHash, logIndex) is globally unique because identical
+/// signed tx bytes across deployments are cryptographically impossible
+/// (different contracts ⇒ different bytes ⇒ different hash), and a shared
+/// claim doubles as cross-watcher dedup if two watcher configs ever
+/// overlap on the same log. "global" names the env-configured
+/// deployment; per-org deployments are named by their org id, which the DB
+/// schema guarantees is unique.
+export function deploymentKey(deployment: Deployment): string {
+  return deployment.orgId ?? "global";
+}
+
+/// Every deployment this server instance serves: the global env deployment,
+/// plus every org with a COMPLETE mainnet deployment when running in
+/// mainnet mode (testnet is one shared playground — see resolveDeployment).
+/// Used to start one indexer set per deployment so on-chain events from
+/// org contracts reach the DB; resolveDeployment's five-field fail-closed
+/// rule is reused so partially-configured orgs are never probed here.
+export async function listServedDeployments(): Promise<Deployment[]> {
+  const deployments: Deployment[] = [globalDeployment()];
+
+  if (config.WARDEN_NETWORK !== "mainnet") return deployments;
+
+  const orgs = await prisma.organization.findMany({
+    where: {
+      mainnetPolicyRegistry: { not: null },
+      mainnetSpendGuard: { not: null },
+      mainnetAuditLog: { not: null },
+      mainnetRpcUrl: { not: null },
+      mainnetChainId: { not: null },
+    },
+    select: {
+      id: true,
+      mainnetPolicyRegistry: true,
+      mainnetSpendGuard: true,
+      mainnetAuditLog: true,
+      mainnetRpcUrl: true,
+      mainnetChainId: true,
+    },
+  });
+
+  for (const org of orgs) {
+    // Reuse the resolver so address validation and client construction stay
+    // in exactly one code path. A misconfigured org that slipped past the
+    // where-clause (e.g. an invalid address) surfaces OrgDeploymentError —
+    // let it propagate: boot must not silently skip an org's events.
+    const deployment = await resolveDeployment(org.id);
+    if (!deployments.some((d) => d.orgId === deployment.orgId)) {
+      deployments.push(deployment);
+    }
+  }
+
+  return deployments;
+}
+
 const clientCache = new Map<string, ChainClients>();
 
 function chainClients(rpcUrl: string, chainId: number): ChainClients {

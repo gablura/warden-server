@@ -29,6 +29,19 @@ function errorFields(err: unknown) {
 
 const app = Fastify({ logger: true });
 
+// Surface the request-signing enforcement posture at boot. A migration
+// window that closes silently is how "temporary" exceptions become
+// permanent, so the config is always stated in the logs — including the
+// warning case, which is the signal to set an UNSIGNED_REQUESTS_ALLOWED_UNTIL
+// deadline or flip REQUIRE_SIGNED_REQUESTS.
+if (config.REQUIRE_SIGNED_REQUESTS) {
+  app.log.info("Request signing enforced: unsigned api-key requests are rejected");
+} else if (config.UNSIGNED_REQUESTS_ALLOWED_UNTIL !== undefined) {
+  app.log.info(`Request signing becomes required after ${config.UNSIGNED_REQUESTS_ALLOWED_UNTIL} — unsigned api-key requests accepted until then`);
+} else {
+  app.log.warn("Request signing NOT enforced and no UNSIGNED_REQUESTS_ALLOWED_UNTIL deadline set — unsigned api-key requests are accepted indefinitely");
+}
+
 // Auth-failure bursts log through the app's pino logger (see failureAlert.ts).
 setAuthAlertLogger((obj, msg) => app.log.error(obj, msg));
 

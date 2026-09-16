@@ -2,6 +2,7 @@ import type { FastifyInstance } from "fastify";
 import { prisma, serializeBigInts } from "../db/client.js";
 import { publicClient } from "../chain/client.js";
 import { readAgentPolicies } from "../chain/policyState.js";
+import { deploymentKey, resolveDeployment } from "../chain/orgContracts.js";
 
 /// Monitoring endpoint (hardening review §5.2). Surfaces indexer lag, agent
 /// health, and system status so a human (or alerting tool) can spot problems
@@ -30,6 +31,33 @@ export async function statusRoutes(app: FastifyInstance) {
       lag: checkpoint ? Number(chainHead - checkpoint.lastBlock) : null,
     }));
 
+    // Per-deployment indexers (per-org mainnet deployments). Their watcher
+    // names carry an `org:<deploymentKey>:` prefix and their chain head comes
+    // from that org's own RPC, so lag is computed per chain. Additive: the
+    // global entries above stay stable for existing dashboards/alerts.
+    const orgIndexerLag = await Promise.all(
+      checkpoints
+        .filter((c) => c.watcher.startsWith("org:"))
+        .map(async (c) => {
+          const deploymentId = c.watcher.split(":")[1]!;
+          let lag: number | null = null;
+          try {
+            const deployment = await resolveDeployment(deploymentId);
+            // The org may have been un-deployed since indexing started —
+            // resolveDeployment then returns the global deployment, which
+            // would measure lag against the wrong chain. Report the raw
+            // checkpoint with no lag in that case.
+            if (deploymentKey(deployment) === deploymentId) {
+              const head = await deployment.publicClient.getBlockNumber();
+              lag = Number(head - c.lastBlock);
+            }
+          } catch {
+            // Unreachable org RPC — the checkpoint row is still worth surfacing.
+          }
+          return { name: c.watcher, deployment: deploymentId, lastBlock: c.lastBlock, lag };
+        }),
+    );
+
     // Agents approaching their daily cap — the hardening review specifically
     // calls out "agents approaching their daily cap" as something a human
     // should be notified about. We flag agents at >80% of their daily cap
@@ -57,7 +85,7 @@ export async function statusRoutes(app: FastifyInstance) {
     return serializeBigInts({
       ok: true,
       chainHead,
-      indexers: indexerLag,
+      indexers: [...indexerLag, ...orgIndexerLag],
       agents: {
         total: agents.length,
         nearCap: nearCapAgents.length,

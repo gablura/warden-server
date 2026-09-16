@@ -262,17 +262,17 @@ The server runs two chain event indexers that:
 ## 🔐 Security
 
 ### Current Status
-- ⚠️ **Policy and approval routes lack authentication** (TODO item)
+- Per-person credentials with Clerk/scoped-token auth on all money-moving routes
+- HMAC request signing (replay protection) — enforcement config-driven via
+  `REQUIRE_SIGNED_REQUESTS` / `UNSIGNED_REQUESTS_ALLOWED_UNTIL`
+- Rate limiting on all routes with tighter limits on gas-spending endpoints
 - Private keys stored in environment variables
 - CORS configured for frontend origin
 - Input validation via Zod schemas
 
 ### Security Recommendations
-1. Add authentication middleware to policy and approval routes
-2. Use secrets management for production deployments
-3. Implement rate limiting for API endpoints
-4. Add request signing for sensitive operations
-5. Use hardware wallets for production wallet keys
+1. Use secrets management for production deployments
+2. Move server-held relayer keys to hardware/KMS-backed signers
 
 ## 🚢 Deployment
 

@@ -44,15 +44,21 @@ model Event {
 }
 
 model PendingRequest {
-  requestId    BigInt   @id @map("request_id")
-  agent        String
-  counterparty String
-  amount       BigInt
-  resolved     Boolean  @default(false)
-  createdAt    DateTime @default(now()) @map("created_at")
+  /// Which contract deployment the request lives on: the org id for a
+  /// per-org mainnet deployment, "global" for the env-configured one.
+  /// Part of the primary key because request ids are per-deployment
+  /// on-chain counters — two deployments can mint the same numeric id.
+  deploymentKey String   @default("global") @map("deployment_key")
+  requestId     BigInt   @map("request_id")
+  agent         String
+  counterparty  String
+  amount        BigInt
+  resolved      Boolean  @default(false)
+  createdAt     DateTime @default(now()) @map("created_at")
 
-  @@index([resolved])
-  @@index([resolved, createdAt])
+  @@id([deploymentKey, requestId])
+  @@index([deploymentKey, resolved])
+  @@index([deploymentKey, resolved, createdAt])
   @@map("pending_requests")
 }
 

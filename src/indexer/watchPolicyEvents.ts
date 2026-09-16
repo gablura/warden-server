@@ -1,20 +1,27 @@
-import { config } from "../config.js";
 import { prisma } from "../db/client.js";
 import { broadcast } from "../ws/broadcast.js";
 import { startWatcher, type ProcessableLog } from "./runner.js";
 import { policyRegistryAbi } from "../chain/abis/policyRegistry.js";
+import { deploymentKey, listServedDeployments, type Deployment } from "../chain/orgContracts.js";
 
 /// Keeps the `agents` and `allowlist` tables current whenever an admin
 /// changes a policy on-chain, so the API never has to read the chain
 /// directly to answer "what can this agent spend right now."
+///
+/// One watcher set per served deployment (global always; per-org mainnet
+/// deployments in mainnet mode) — see watchPaymentEventsFor for the
+/// deployment-scoping rationale.
+///
 /// Processing runs through indexer/runner.ts (idempotent, checkpointed,
 /// backfilled on restart).
-export async function watchPolicyEvents(): Promise<void> {
-  const address = config.POLICY_REGISTRY_ADDRESS as `0x${string}`;
+export async function watchPolicyEventsFor(deployment: Deployment): Promise<void> {
+  const key = deploymentKey(deployment);
+  const checkpointPrefix = key === "global" ? "" : `org:${key}:`;
+  const watcherName = (event: string) => `${checkpointPrefix}policies:${event}`;
 
   const watchers = [
     {
-      name: "policies:PolicySet",
+      name: watcherName("PolicySet"),
       eventName: "PolicySet",
       onLog: async ({ args }: ProcessableLog) => {
         const { agent, dailyCap, perTxCap, escalationThreshold } = args as {
@@ -22,9 +29,9 @@ export async function watchPolicyEvents(): Promise<void> {
         };
 
         await prisma.agent.upsert({
-          where: { address: agent! },
+          where: { address: agent!.toLowerCase() },
           create: {
-            address: agent!,
+            address: agent!.toLowerCase(),
             dailyCap: dailyCap ?? 0n,
             perTxCap: perTxCap ?? 0n,
             escalationThreshold: escalationThreshold ?? 0n,
@@ -48,7 +55,7 @@ export async function watchPolicyEvents(): Promise<void> {
       },
     },
     {
-      name: "policies:AllowlistUpdated",
+      name: watcherName("AllowlistUpdated"),
       eventName: "AllowlistUpdated",
       onLog: async ({ args }: ProcessableLog) => {
         const { agent, counterparty, allowed } = args as {
@@ -56,8 +63,8 @@ export async function watchPolicyEvents(): Promise<void> {
         };
 
         await prisma.allowlist.upsert({
-          where: { agent_counterparty: { agent: agent!, counterparty: counterparty! } },
-          create: { agent: agent!, counterparty: counterparty!, allowed: allowed! },
+          where: { agent_counterparty: { agent: agent!.toLowerCase(), counterparty: counterparty!.toLowerCase() } },
+          create: { agent: agent!.toLowerCase(), counterparty: counterparty!.toLowerCase(), allowed: allowed! },
           update: { allowed: allowed! },
         });
 
@@ -68,7 +75,21 @@ export async function watchPolicyEvents(): Promise<void> {
 
   await Promise.all(
     watchers.map((w) =>
-      startWatcher({ name: w.name, address, abi: policyRegistryAbi, eventName: w.eventName, onLog: w.onLog }),
+      startWatcher({
+        name: w.name,
+        address: deployment.policyRegistry,
+        abi: policyRegistryAbi,
+        eventName: w.eventName,
+        client: deployment.publicClient,
+        onLog: w.onLog,
+      }),
     ),
   );
+}
+
+/// Index policy events for every served deployment (global always; per-org
+/// mainnet deployments in mainnet mode).
+export async function watchPolicyEvents(): Promise<void> {
+  const deployments = await listServedDeployments();
+  await Promise.all(deployments.map((deployment) => watchPolicyEventsFor(deployment)));
 }

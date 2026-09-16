@@ -4,6 +4,15 @@ import { isAddress } from "viem";
 
 const address = z.string().refine((v) => isAddress(v), "invalid EVM address");
 
+// ISO 8601 datetime (e.g. 2026-10-01T00:00:00Z), tolerating the empty string
+// dotenv produces for an unset `KEY=` line in a copied .env.example (treated
+// as absent). Parsed at boot so a typo fails fast instead of silently never
+// expiring at runtime.
+const isoDatetime = z
+  .string()
+  .transform((v) => (v.trim() === "" ? undefined : v))
+  .refine((v): v is string | undefined => v === undefined || !Number.isNaN(Date.parse(v)), "must be an ISO 8601 datetime (e.g. 2026-10-01T00:00:00Z)");
+
 // 0x-prefixed 20-byte private key (exactly 64 hex chars). "startsWith(0x)"
 // accepted any trailing junk and failed only later, deep in viem at first
 // use — validating the full shape here fails fast at boot instead.
@@ -28,6 +37,20 @@ const schema = z.object({
   // — the old shared ADMIN/APPROVER_API_KEY pair was removed as part of the
   // session→API auth migration (§6): shared static secrets no longer exist.
   WARDEN_API_KEYS: z.string().optional(),
+
+  // HMAC request signing (replay protection, see auth/requestSignature.ts).
+  // REQUIRE_SIGNED_REQUESTS rejects unsigned api-key requests immediately —
+  // flip it once every service caller signs (see
+  // scripts/signed-request-example.mjs).
+  // UNSIGNED_REQUESTS_ALLOWED_UNTIL is the migration deadline: unsigned
+  // requests are accepted until it passes, then rejected automatically. At
+  // least one must be set — without either, the signing scheme exists but
+  // can never be enforced, which the review called out as a gap.
+  REQUIRE_SIGNED_REQUESTS: z
+    .enum(["true", "false"])
+    .default("false")
+    .transform((v) => v === "true"),
+  UNSIGNED_REQUESTS_ALLOWED_UNTIL: isoDatetime.optional(),
 
   // Network the server's contracts live on. Testnet is ungated by design
   // (exploration); on mainnet the production gate requires verified orgs.
@@ -68,6 +91,19 @@ const schema = z.object({
       code: z.ZodIssueCode.custom,
       message: "CIRCLE_API_KEY, CIRCLE_ENTITY_SECRET, and CIRCLE_WALLET_SET_ID must all be set for embedded wallets",
       path: ["CIRCLE_API_KEY"],
+    });
+  }
+
+  // Request-signing enforcement must be meaningful: a deadline in the past
+  // without the flag is fine (it just enforces), but a deadline in the PAST
+  // set alongside the flag is redundant, and one in the past is always a
+  // misconfiguration worth refusing at boot — deadlines are for scheduling
+  // a future cutover, not for documenting one that already happened.
+  if (cfg.UNSIGNED_REQUESTS_ALLOWED_UNTIL !== undefined && Date.parse(cfg.UNSIGNED_REQUESTS_ALLOWED_UNTIL) <= Date.now()) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "UNSIGNED_REQUESTS_ALLOWED_UNTIL is in the past — set REQUIRE_SIGNED_REQUESTS=true instead",
+      path: ["UNSIGNED_REQUESTS_ALLOWED_UNTIL"],
     });
   }
 

@@ -1,4 +1,4 @@
-import type { Abi } from "viem";
+import type { Abi, PublicClient, Transport, Chain } from "viem";
 import { publicClient } from "../chain/client.js";
 import { prisma } from "../db/client.js";
 
@@ -54,11 +54,18 @@ export interface ProcessableLog {
 type LogHandler = (log: ProcessableLog) => Promise<void>;
 
 interface WatcherConfig {
-  /// Stable checkpoint key, e.g. "payments", "policies".
+  /// Stable checkpoint key. MUST be deployment-scoped, e.g.
+  /// "payments:PaymentApproved" on the global deployment or
+  /// "org:<id>:payments:PaymentApproved" for a per-org deployment —
+  /// blocks are per-chain, so a shared key would let one deployment's
+  /// progress corrupt another's backfill.
   name: string;
   address: `0x${string}`;
   abi: Abi;
   eventName: string;
+  /// Client for THIS deployment's chain. Per-org deployments run on their
+  /// own RPC/chain id, so the watcher cannot share the global public client.
+  client: PublicClient<Transport, Chain>;
   onLog: LogHandler;
 }
 
@@ -68,7 +75,7 @@ interface WatcherConfig {
 /// a single log are logged and do not stop the watcher — mirroring the
 /// previous per-event error handling, a bad event must not kill the indexer.
 export async function startWatcher(cfg: WatcherConfig): Promise<void> {
-  publicClient.watchContractEvent({
+  cfg.client.watchContractEvent({
     address: cfg.address,
     abi: cfg.abi,
     eventName: cfg.eventName,
@@ -85,7 +92,7 @@ async function backfill(cfg: WatcherConfig) {
     // First boot with this watcher: record the current head as the baseline.
     // No historical events are processed (same as the old live-only behavior);
     // from now on every restart resumes from here instead of skipping ahead.
-    const head = await publicClient.getBlockNumber();
+    const head = await cfg.client.getBlockNumber();
     await prisma.indexerCheckpoint.create({ data: { watcher: cfg.name, lastBlock: head } });
     return;
   }
@@ -93,7 +100,7 @@ async function backfill(cfg: WatcherConfig) {
   let from = checkpoint.lastBlock + 1n;
   let head: bigint;
   try {
-    head = await publicClient.getBlockNumber();
+    head = await cfg.client.getBlockNumber();
   } catch (err) {
     console.error(`[${cfg.name}] backfill aborted: could not read the chain head:`, err);
     return;
@@ -112,7 +119,7 @@ async function backfill(cfg: WatcherConfig) {
     let processed = false;
     for (let attempt = 1; attempt <= 5 && !processed; attempt++) {
       try {
-        const logs = await publicClient.getContractEvents({
+        const logs = await cfg.client.getContractEvents({
           address: cfg.address,
           abi: cfg.abi,
           eventName: cfg.eventName as never,

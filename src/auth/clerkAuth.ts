@@ -6,7 +6,7 @@ import { findCredential } from "./credentials.js";
 import { verifyScopedToken, type ScopedTokenClaims } from "./jwt.js";
 import { ensureUserWallet } from "./wallet.js";
 import { claimPendingInvites } from "./invites.js";
-import { verifyRequestSignature, type SignatureFailure } from "./requestSignature.js";
+import { unsignedRequestsAllowed, verifyRequestSignature, type SignatureFailure } from "./requestSignature.js";
 import { recordAuthFailure } from "./failureAlert.js";
 import { generateCorrelationId } from "./correlation.js";
 
@@ -121,7 +121,14 @@ function reject(req: FastifyRequest, reply: FastifyReply, code: number, error: s
 function signatureRejection(req: FastifyRequest, reply: FastifyReply, role: string, failure: SignatureFailure) {
   if (failure.ok) return;
   req.log.warn({ role, reason: failure.reason, ip: req.ip }, "rejected signed request");
-  return reject(req, reply, 401, `invalid request signature (${failure.reason})`, { role, reason: failure.reason });
+  // `unsigned_request` gets its own message: nothing is "invalid" about the
+  // signature — there isn't one, and the fix is to start signing, not to
+  // debug an HMAC. scripts/signed-request-example.mjs shows how.
+  const message =
+    failure.reason === "unsigned_request"
+      ? "request signing is required for api-key auth (send x-timestamp, x-nonce, and x-signature — see scripts/signed-request-example.mjs)"
+      : `invalid request signature (${failure.reason})`;
+  return reject(req, reply, 401, message, { role, reason: failure.reason });
 }
 
 // ── Extract auth from request ─────────────────────────────────────────
@@ -374,7 +381,10 @@ export function requireRole(role: "admin" | "approver" | "viewer") {
 
       req.operator = operator;
 
-      // API key signed-request verification
+      // API key signed-request verification. Signing is optional while the
+      // configured migration window is open (see requestSignature.ts); once
+      // REQUIRE_SIGNED_REQUESTS=true or the deadline passes, unsigned
+      // api-key requests are rejected with `unsigned_request`.
       const apiKey = req.headers["x-api-key"] ?? req.headers.authorization?.slice(7);
       if (typeof apiKey === "string") {
         const signature = verifyRequestSignature(
@@ -385,6 +395,7 @@ export function requireRole(role: "admin" | "approver" | "viewer") {
             signature: req.headers["x-signature"],
           },
           req.body,
+          { allowUnsigned: unsignedRequestsAllowed() },
         );
         return signatureRejection(req, reply, role, signature);
       }

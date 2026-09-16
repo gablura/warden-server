@@ -3,7 +3,8 @@ import { prisma, serializeBigInts } from "../db/client.js";
 import { publicClient } from "../chain/client.js";
 import { spendGuardAbi } from "../chain/abis/spendGuard.js";
 import { readAgentPolicies } from "../chain/policyState.js";
-import { resolveDeployment, resolveDeploymentForAgent, type Deployment } from "../chain/orgContracts.js";
+import { deploymentKey, resolveDeployment, resolveDeploymentForAgent, type Deployment } from "../chain/orgContracts.js";
+import { paymentCheckpointName } from "../indexer/watchPaymentEvents.js";
 import { GrantMissingError, submitAsApprover, type SigningResult } from "../chain/signing.js";
 import { broadcast } from "../ws/broadcast.js";
 import { requireRole } from "../auth/clerkAuth.js";
@@ -40,13 +41,16 @@ class AlreadyResolvedError extends Error {
 /// Per-credential approval scoping (see credentials.ts). An approver
 /// credential may declare a maxApproval ceiling (in base units); requests
 /// above it are refused before any transaction is signed. The amount comes
-/// from the indexed PendingRequest row; if the row hasn't been indexed yet
-/// the scope check passes, because failing closed here would let an indexer
-/// lag make *all* approvals impossible, and the ceiling is a scoping
+/// from the indexed PendingRequest row (scoped to the request's deployment —
+/// request ids are per-deployment counters); if the row hasn't been indexed
+/// yet the scope check passes, because failing closed here would let an
+/// indexer lag make *all* approvals impossible, and the ceiling is a scoping
 /// refinement, not the daily-cap enforcement (which lives on-chain).
-async function withinApprovalScope(requestId: bigint, operatorMaxApproval: bigint | undefined) {
+async function withinApprovalScope(deploymentKey: string, requestId: bigint, operatorMaxApproval: bigint | undefined) {
   if (operatorMaxApproval === undefined) return;
-  const pending = await prisma.pendingRequest.findUnique({ where: { requestId } });
+  const pending = await prisma.pendingRequest.findUnique({
+    where: { deploymentKey_requestId: { deploymentKey, requestId } },
+  });
   if (!pending) return; // see comment above
   if (pending.amount > operatorMaxApproval) {
     throw new Error(`approval amount exceeds this credential's maxApproval ceiling`);
@@ -76,17 +80,38 @@ async function readPending(deployment: Deployment, requestId: bigint): Promise<P
   }) as Promise<PendingRow>;
 }
 
-/// Locate the deployment holding a request. The indexed row names the agent
-/// directly; otherwise probe the operator's org deployment first, then the
-/// global one, and take the first where the request exists (non-zero
-/// agent). Returns null when the request lives on no served deployment.
+/// Locate the deployment holding a request.
+///
+/// Request ids are per-deployment on-chain counters, so resolution goes:
+///   1. An indexed row under the operator's org deployment key (their org's
+///      mainnet contracts) — the common mainnet case.
+///   2. An indexed row under the global key, resolved through the agent's
+///      org mapping (the historical single-deployment path).
+///   3. Chain probing of the operator's org deployment, then the global
+///      one — the first where the request exists (non-zero agent) wins.
+///      This also covers rows not indexed yet.
+///
+/// Without org context (service approvers), only the global key/probe is
+/// considered: there is no basis to guess which org deployment to consult.
+/// Returns null when the request lives on no served deployment.
 async function findRequestDeployment(
   requestId: bigint,
   operatorOrgId?: string,
 ): Promise<{ deployment: Deployment; agent: string } | null> {
-  const row = await prisma.pendingRequest.findUnique({ where: { requestId } });
-  if (row) {
-    return { deployment: await resolveDeploymentForAgent(row.agent), agent: row.agent };
+  if (operatorOrgId) {
+    const orgRow = await prisma.pendingRequest.findUnique({
+      where: { deploymentKey_requestId: { deploymentKey: operatorOrgId, requestId } },
+    });
+    if (orgRow) {
+      return { deployment: await resolveDeployment(operatorOrgId), agent: orgRow.agent };
+    }
+  }
+
+  const globalRow = await prisma.pendingRequest.findUnique({
+    where: { deploymentKey_requestId: { deploymentKey: "global", requestId } },
+  });
+  if (globalRow) {
+    return { deployment: await resolveDeploymentForAgent(globalRow.agent), agent: globalRow.agent };
   }
 
   const candidates: Deployment[] = [];
@@ -119,25 +144,35 @@ export async function approvalRoutes(app: FastifyInstance) {
   app.get<{ Querystring: { limit?: string } }>("/approvals", async (req) => {
     const { limit } = limitQuerySchema.parse(req.query);
 
+    // The queue view is deployment-scoped. Org members (Clerk + scoped
+    // tokens always carry an orgId — see clerkAuth) see their org's own
+    // mainnet deployment queue; callers without org context (service
+    // credentials, anonymous viewers) see the global deployment's queue.
+    // resolveDeployment keeps testnet pinned to global, and the chain read
+    // comes from the SAME deployment so lag is measured against the right
+    // chain. The queue is fed by the per-deployment indexers started in
+    // server.ts (see orgContracts.listServedDeployments).
+    const deployment = await resolveDeployment(req.operator?.orgId);
+    const key = deploymentKey(deployment);
+
     // Fetch pending requests, indexer checkpoint, and chain head in parallel.
     // The checkpoint tells us how far behind the indexer is; if it's lagging,
     // some "pending" requests may already be resolved on-chain — the staleRead
     // flag surfaces this so the frontend can warn before a wasted-gas revert.
-    // NOTE: the queue view covers the server's connected (global) deployment;
-    // per-org mainnet deployments are written through this API but indexed by
-    // dedicated per-deployment instances (see orgContracts.ts).
     const [result, checkpoint, chainHead] = await Promise.all([
       paginatedQuery(
         (take) =>
           prisma.pendingRequest.findMany({
-            where: { resolved: false },
+            where: { deploymentKey: key, resolved: false },
             orderBy: { createdAt: "asc" },
             take,
           }),
         limit,
       ),
-      prisma.indexerCheckpoint.findUnique({ where: { watcher: "payments:PaymentApproved" } }),
-      publicClient.getBlockNumber().catch(() => 0n),
+      prisma.indexerCheckpoint.findUnique({
+        where: { watcher: paymentCheckpointName(key, "PaymentApproved") },
+      }),
+      deployment.publicClient.getBlockNumber().catch(() => 0n),
     ]);
 
     const indexerLag = checkpoint ? Number(chainHead - checkpoint.lastBlock) : null;
@@ -176,6 +211,7 @@ export async function approvalRoutes(app: FastifyInstance) {
   async function resolveRequest(
     requestId: bigint,
     operator: { id: string; orgId?: string },
+    operatorMaxApproval: bigint | undefined,
     decision: "approvePending" | "rejectPending",
   ): Promise<{ signing: SigningResult; deployment: Deployment; agent: string }> {
     const found = await findRequestDeployment(requestId, operator.orgId);
@@ -183,6 +219,10 @@ export async function approvalRoutes(app: FastifyInstance) {
       throw Object.assign(new Error("no such pending request on any served deployment"), { statusCode: 404, code: "not_found" });
     }
     const { deployment } = found;
+
+    // Scoped INSIDE the resolution: the ceiling applies to the deployment
+    // the request actually lives on, whose indexed row carries the amount.
+    await withinApprovalScope(deploymentKey(deployment), requestId, operatorMaxApproval);
 
     const signature = decision === "approvePending" ? "approvePending(uint256)" : "rejectPending(uint256)";
     try {
@@ -220,10 +260,8 @@ export async function approvalRoutes(app: FastifyInstance) {
       return reply.code(400).send({ error: "invalid_request", message: "approval id must be a non-negative integer" });
     }
 
-    await withinApprovalScope(requestId, req.operator.maxApproval);
-
     try {
-      const { signing, agent } = await resolveRequest(requestId, req.operator, "approvePending");
+      const { signing, agent } = await resolveRequest(requestId, req.operator, req.operator.maxApproval, "approvePending");
       await recordOperatorAction(req.operator, "approve", requestId.toString(), signing.txHash, signing);
       broadcast({ type: "approval_resolved", requestId: requestId.toString(), decision: "approved", txHash: signing.txHash, by: req.operator.id, agent });
       return reply.send({ txHash: signing.txHash, signer: signing.signer, via: signing.via, correlationId: req.correlationId });
@@ -252,7 +290,7 @@ export async function approvalRoutes(app: FastifyInstance) {
     }
 
     try {
-      const { signing, agent } = await resolveRequest(requestId, req.operator, "rejectPending");
+      const { signing, agent } = await resolveRequest(requestId, req.operator, req.operator.maxApproval, "rejectPending");
       await recordOperatorAction(req.operator, "reject", requestId.toString(), signing.txHash, signing);
       broadcast({ type: "approval_resolved", requestId: requestId.toString(), decision: "rejected", txHash: signing.txHash, by: req.operator.id, agent });
       return reply.send({ txHash: signing.txHash, signer: signing.signer, via: signing.via, correlationId: req.correlationId });

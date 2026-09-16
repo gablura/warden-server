@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import { config } from "../config.js";
 
 /// Optional HMAC request signing — replay protection for the api-key auth
 /// layer. A raw `x-api-key` travels on every request and is valid forever if
@@ -16,9 +17,14 @@ import crypto from "node:crypto";
 ///                 (JSON.stringify of the parsed body for JSON requests;
 ///                 sha256 of "" when there is no body, e.g. GET)
 ///
-/// Unsigned requests are still accepted while clients migrate. Removing that
-/// transition window is a one-line change here (see verifyRequestSignature's
-/// return path) once every caller signs.
+/// Enforcement is configuration-driven — no code change is needed to close
+/// the migration window:
+///   REQUIRE_SIGNED_REQUESTS=true            reject unsigned requests now
+///   UNSIGNED_REQUESTS_ALLOWED_UNTIL=<ISO>   reject unsigned requests once
+///                                           the deadline passes
+/// Clients that send a partial header set, or fail verification, are always
+/// rejected regardless of the window. See scripts/signed-request-example.mjs
+/// for a reference signer.
 
 const SIGNATURE_MAX_AGE_MS = 5 * 60 * 1000;
 const NONCE_TTL_MS = SIGNATURE_MAX_AGE_MS;
@@ -48,19 +54,35 @@ export function expectedSignature(apiKey: string, timestamp: string, nonce: stri
 
 export type SignatureFailure =
   | { ok: true }
-  | { ok: false; reason: "missing_timestamp" | "missing_nonce" | "missing_signature" | "bad_timestamp" | "stale_timestamp" | "bad_signature_format" | "replayed_nonce" | "invalid_signature" };
+  | { ok: false; reason: "missing_timestamp" | "missing_nonce" | "missing_signature" | "bad_timestamp" | "stale_timestamp" | "bad_signature_format" | "replayed_nonce" | "invalid_signature" | "unsigned_request" };
+
+/// Whether unsigned (legacy) api-key requests are still accepted. The
+/// REQUIRE_SIGNED_REQUESTS flag forces enforcement immediately; otherwise
+/// enforcement begins automatically once the migration deadline passes.
+/// Evaluated per request (not cached at boot) so a scheduled deadline
+/// cutover happens on time without a restart.
+export function unsignedRequestsAllowed(): boolean {
+  if (config.REQUIRE_SIGNED_REQUESTS) return false;
+  if (config.UNSIGNED_REQUESTS_ALLOWED_UNTIL === undefined) return true;
+  return Date.now() < Date.parse(config.UNSIGNED_REQUESTS_ALLOWED_UNTIL);
+}
 
 export function verifyRequestSignature(
   apiKey: string,
   headers: { timestamp?: string | string[]; nonce?: string | string[]; signature?: string | string[] },
   body: unknown,
+  options?: { allowUnsigned?: boolean },
 ): SignatureFailure {
   const timestamp = typeof headers.timestamp === "string" ? headers.timestamp : undefined;
   const nonce = typeof headers.nonce === "string" ? headers.nonce : undefined;
   const signature = typeof headers.signature === "string" ? headers.signature : undefined;
 
-  // Fully unsigned request → legacy mode, accepted during the migration.
-  if (!timestamp && !nonce && !signature) return { ok: true };
+  // Fully unsigned request → legacy mode. Accepted only while the configured
+  // migration window is open (unsignedRequestsAllowed); once it closes, or
+  // with REQUIRE_SIGNED_REQUESTS=true, this is a hard rejection.
+  if (!timestamp && !nonce && !signature) {
+    return options?.allowUnsigned === false ? { ok: false, reason: "unsigned_request" } : { ok: true };
+  }
   if (!timestamp) return { ok: false, reason: "missing_timestamp" };
   if (!nonce) return { ok: false, reason: "missing_nonce" };
   if (!signature) return { ok: false, reason: "missing_signature" };

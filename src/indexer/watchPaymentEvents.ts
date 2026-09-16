@@ -43,7 +43,7 @@ export async function watchPaymentEventsFor(deployment: Deployment): Promise<voi
         await prisma.event.create({
           data: { agent: agent!, counterparty: counterparty!, amount: amt, decision: "approved", txHash: transactionHash },
         });
-        await upsertAgentSpend(agent!, amt);
+        await upsertAgentSpend(agent!, amt, deployment);
         // requestId is 0 for payments that settled immediately (no
         // escalation ever happened, so there's nothing pending to resolve).
         if (requestId && requestId > 0n) {
@@ -156,8 +156,10 @@ export async function watchPaymentEventsFor(deployment: Deployment): Promise<voi
 /// counter is best-effort bookkeeping. When a per-org deployment indexes an
 /// agent that has no row yet, one is created with zeroed caps: the caps are
 /// backfilled by the next PolicySet/AllowlistUpdated event or the live chain
-/// read in /agents, never invented here.
-async function upsertAgentSpend(agent: string, amt: bigint) {
+/// read in /agents, never invented here. The org stamp follows the same rule
+/// as the policy watcher: the emitting deployment owns the row (null for
+/// global), which is what tenant-scopes /agents and /audit.
+async function upsertAgentSpend(agent: string, amt: bigint, deployment: Deployment) {
   try {
     await prisma.agent.update({
       where: { address: agent.toLowerCase() },
@@ -173,6 +175,7 @@ async function upsertAgentSpend(agent: string, amt: bigint) {
         escalationThreshold: 0n,
         spentToday: 0n,
         status: "active",
+        organizationId: deployment.orgId,
       },
       update: { spentToday: { increment: amt } },
     });

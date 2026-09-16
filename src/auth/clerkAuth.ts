@@ -131,6 +131,31 @@ function signatureRejection(req: FastifyRequest, reply: FastifyReply, role: stri
   return reject(req, reply, 401, message, { role, reason: failure.reason });
 }
 
+/// Shared api-key signature verification for requireRole and optionalAuth.
+/// Returns true when the request may continue; false after a 401 reply was
+/// already sent. No key header at all → true (nothing to verify).
+function checkApiKeySignature(
+  req: FastifyRequest,
+  reply: FastifyReply,
+  role: string,
+): boolean {
+  const apiKey = req.headers["x-api-key"] ?? req.headers.authorization?.slice(7);
+  if (typeof apiKey !== "string") return true;
+  const result = verifyRequestSignature(
+    apiKey,
+    {
+      timestamp: req.headers["x-timestamp"],
+      nonce: req.headers["x-nonce"],
+      signature: req.headers["x-signature"],
+    },
+    req.body,
+    { allowUnsigned: unsignedRequestsAllowed() },
+  );
+  if (result.ok) return true;
+  signatureRejection(req, reply, role, result);
+  return false;
+}
+
 // ── Extract auth from request ─────────────────────────────────────────
 
 type AuthResult =
@@ -197,35 +222,66 @@ async function extractAuth(req: FastifyRequest): Promise<AuthResult> {
 
 async function resolveClerkOperator(
   userId: string,
-  requestedRole: "admin" | "approver",
+  // Vestigial: role resolution comes from org membership, not this hint.
+  // Kept so call sites read naturally; viewers resolve fine too.
+  _requestedRole: "admin" | "approver" | "viewer",
   orgId?: string,
 ): Promise<Operator | null> {
   // Find or create user in our DB
   let user = await prisma.user.findUnique({ where: { clerkId: userId } });
 
   if (!user) {
-    // Fetch from Clerk API
-    const res = await fetch(`https://api.clerk.com/v1/users/${userId}`, {
-      headers: { Authorization: `Bearer ${config.CLERK_SECRET_KEY}` },
-    });
-    if (!res.ok) return null;
+    // Fetch from Clerk API. A failure here must not surface as a 500 from
+    // auth middleware — degrade to 401 (the request retries), not a crash.
+    let email: string | undefined;
+    try {
+      const res = await fetch(`https://api.clerk.com/v1/users/${userId}`, {
+        headers: { Authorization: `Bearer ${config.CLERK_SECRET_KEY}` },
+      });
+      if (!res.ok) return null;
 
-    const clerkUser = await res.json() as {
-      id: string;
-      email_addresses: Array<{ email_address: string; id: string }>;
-      primary_email_address_id: string;
-    };
+      const clerkUser = await res.json() as {
+        id: string;
+        email_addresses: Array<{ email_address: string; id: string }>;
+        primary_email_address_id: string;
+      };
 
-    const email = clerkUser.email_addresses.find((e) => e.id === clerkUser.primary_email_address_id)?.email_address;
+      email = clerkUser.email_addresses.find((e) => e.id === clerkUser.primary_email_address_id)?.email_address;
+    } catch (err) {
+      console.error("Clerk user lookup failed during auth:", err);
+      return null;
+    }
     if (!email) return null;
 
-    user = await prisma.user.create({
-      data: {
-        clerkId: userId,
-        email,
-        label: email.split("@")[0],
-      },
-    });
+    // Race-safe provisioning. The client fires several authenticated calls
+    // in parallel on first login (getMe + listOrgs + the WS ticket), and
+    // every one of them lands here with "no user yet" — create() would make
+    // the losers blow up with a unique-violation 500. upsert makes the
+    // double-provision a no-op; the P2002 fallback covers the email-shape
+    // collision (row exists under an earlier Clerk identity).
+    try {
+      user = await prisma.user.upsert({
+        where: { clerkId: userId },
+        create: {
+          clerkId: userId,
+          email,
+          label: email.split("@")[0],
+        },
+        update: {},
+      });
+    } catch (err) {
+      if ((err as { code?: string }).code !== "P2002") throw err;
+      const existing = await prisma.user.findUnique({ where: { clerkId: userId } });
+      if (existing) {
+        user = existing; // another concurrent request won the create — same identity
+      } else {
+        const sameEmail = await prisma.user.findUnique({ where: { email } });
+        if (!sameEmail) throw err;
+        // Same human (verified email) signing in through a new Clerk
+        // identity — link the identity instead of failing forever.
+        user = await prisma.user.update({ where: { id: sameEmail.id }, data: { clerkId: userId } });
+      }
+    }
 
     // First login: attach any pending invites for this email (join-via-link
     // works even when the invite was sent before the account existed), then
@@ -381,30 +437,68 @@ export function requireRole(role: "admin" | "approver" | "viewer") {
 
       req.operator = operator;
 
-      // API key signed-request verification. Signing is optional while the
-      // configured migration window is open (see requestSignature.ts); once
-      // REQUIRE_SIGNED_REQUESTS=true or the deadline passes, unsigned
-      // api-key requests are rejected with `unsigned_request`.
-      const apiKey = req.headers["x-api-key"] ?? req.headers.authorization?.slice(7);
-      if (typeof apiKey === "string") {
-        const signature = verifyRequestSignature(
-          apiKey,
-          {
-            timestamp: req.headers["x-timestamp"],
-            nonce: req.headers["x-nonce"],
-            signature: req.headers["x-signature"],
-          },
-          req.body,
-          { allowUnsigned: unsignedRequestsAllowed() },
-        );
-        return signatureRejection(req, reply, role, signature);
-      }
+      // API key signed-request verification (shared with optionalAuth).
+      // Signing is optional while the configured migration window is open
+      // (see requestSignature.ts); once REQUIRE_SIGNED_REQUESTS=true or the
+      // deadline passes, unsigned api-key requests are rejected with
+      // `unsigned_request`.
+      if (!checkApiKeySignature(req, reply, role)) return;
       return;
     }
 
     // ── No auth ──────────────────────────────────────────────────────
     req.log.warn({ role, ip: req.ip }, "rejected request with missing auth");
     return reject(req, reply, 401, `missing authentication (requires ${role} credentials)`, { role, reason: "missing_key" });
+  };
+}
+
+// ── optionalAuth middleware ────────────────────────────────────────────
+//
+// For routes that serve BOTH authenticated tenants and anonymous callers:
+// credentials are resolved when present (populating req.operator, so
+// deployment scoping applies), and invalid credentials are still rejected —
+// but the absence of credentials is allowed through for the anonymous view.
+// A bad key must never silently downgrade to anonymous.
+export function optionalAuth() {
+  return async function optionalAuthHandler(req: FastifyRequest, reply: FastifyReply) {
+    const correlationId = generateCorrelationId();
+    req.correlationId = correlationId;
+
+    const auth = await extractAuth(req);
+    if (auth.kind === "none") return; // anonymous — allowed by design
+
+    if (auth.kind === "scoped") {
+      const { claims } = auth;
+      const requestedOrgId = (req.query as Record<string, string>)?.orgId as string | undefined;
+      if (requestedOrgId !== undefined && requestedOrgId !== claims.orgId) {
+        req.log.warn({ ip: req.ip }, "rejected scoped token used for a different org");
+        return reject(req, reply, 403, "token is scoped to a different organization");
+      }
+      req.operator = {
+        id: claims.sub,
+        label: claims.email,
+        role: claims.role,
+        orgId: claims.orgId,
+        orgRole: claims.role,
+        walletAddress: claims.walletAddress,
+      };
+      return;
+    }
+
+    if (auth.kind === "clerk") {
+      const orgId = (req.query as Record<string, string>)?.orgId as string | undefined;
+      const operator = await resolveClerkOperator(auth.userId, "viewer", orgId);
+      if (!operator) {
+        return reject(req, reply, 401, "user not found or not a member of this organization");
+      }
+      req.operator = operator;
+      return;
+    }
+
+    // api_key
+    req.operator = auth.operator;
+    if (!checkApiKeySignature(req, reply, "api_key")) return;
+    return;
   };
 }
 

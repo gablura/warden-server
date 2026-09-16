@@ -7,7 +7,7 @@ import { deploymentKey, resolveDeployment, resolveDeploymentForAgent, type Deplo
 import { paymentCheckpointName } from "../indexer/watchPaymentEvents.js";
 import { GrantMissingError, submitAsApprover, type SigningResult } from "../chain/signing.js";
 import { broadcastEvent } from "../ws/broadcast.js";
-import { requireRole } from "../auth/clerkAuth.js";
+import { requireRole, optionalAuth } from "../auth/clerkAuth.js";
 import { productionGate } from "../auth/productionGate.js";
 import { limitQuerySchema, paginatedQuery } from "../db/pagination.js";
 import { getCorrelationId } from "../auth/correlation.js";
@@ -141,7 +141,11 @@ async function ensureUnresolvedOn(deployment: Deployment, requestId: bigint) {
 }
 
 export async function approvalRoutes(app: FastifyInstance) {
-  app.get<{ Querystring: { limit?: string } }>("/approvals", async (req) => {
+  // The queue is tenant-scoped when credentials are presented (see the
+  // deployment-resolution note below) and keeps an anonymous view for
+  // service/monitoring callers — but PRESENTED credentials are always
+  // verified: a bad key gets a 401, never a silent downgrade to anonymous.
+  app.get<{ Querystring: { limit?: string } }>("/approvals", { preHandler: optionalAuth() }, async (req) => {
     const { limit } = limitQuerySchema.parse(req.query);
 
     // The queue view is deployment-scoped. Org members (Clerk + scoped

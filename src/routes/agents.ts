@@ -2,7 +2,21 @@ import type { FastifyInstance } from "fastify";
 import type { Agent } from "@prisma/client";
 import { prisma, serializeBigInts } from "../db/client.js";
 import { readAgentPolicies, readAgentPolicy, type AgentPolicySnapshot } from "../chain/policyState.js";
+import { resolveDeployment, deploymentKey } from "../chain/orgContracts.js";
+import { optionalAuth } from "../auth/clerkAuth.js";
 import { limitQuerySchema, paginatedQuery, cursorQuerySchema, cursorPaginatedQuery, cursorWhere, encodeCursor } from "../db/pagination.js";
+
+/// The agent set visible to a caller: the agents of the caller's resolved
+/// deployment — their org's own contracts on mainnet, the shared global
+/// deployment on testnet and for service/anonymous callers (the exact scope
+/// rule /approvals uses). Agents are org-stamped by the indexers (see
+/// watchPolicyEvents / watchPaymentEvents), so the membership filter is
+/// exact; `organizationId: null` matches the unstamped global-deployment
+/// agents.
+async function scopedAgentWhere(orgId: string | null | undefined) {
+  const deployment = await resolveDeployment(orgId ?? null);
+  return deployment.orgId === null ? { organizationId: null } : { organizationId: deployment.orgId };
+}
 
 // EVM addresses are case-insensitive; checksum casing is a display convention.
 // The indexer stores the lowercase form it gets from the event args, so
@@ -42,11 +56,11 @@ function withLivePolicy(agent: Agent, policy: AgentPolicySnapshot) {
 }
 
 export async function agentRoutes(app: FastifyInstance) {
-  app.get<{ Querystring: { limit?: string } }>("/agents", async (req) => {
+  app.get<{ Querystring: { limit?: string } }>("/agents", { preHandler: optionalAuth() }, async (req) => {
     const { limit } = limitQuerySchema.parse(req.query);
 
     const result = await paginatedQuery(
-      (take) => prisma.agent.findMany({ take }),
+      async (take) => prisma.agent.findMany({ where: await scopedAgentWhere(req.operator?.orgId), take }),
       limit,
     );
 
@@ -69,11 +83,18 @@ export async function agentRoutes(app: FastifyInstance) {
     return serializeBigInts({ data: enriched, hasMore: result.hasMore });
   });
 
-  app.get<{ Params: { address: string }; Querystring: { limit?: string; cursor?: string } }>("/agents/:address", async (req, reply) => {
+  app.get<{ Params: { address: string }; Querystring: { limit?: string; cursor?: string } }>("/agents/:address", { preHandler: optionalAuth() }, async (req, reply) => {
     const address = normalizeAddress(req.params.address);
 
     const agent = await prisma.agent.findUnique({ where: { address } });
     if (!agent) return reply.code(404).send({ error: "agent not found" });
+
+    // Same deployment scope as the list: an agent belonging to another
+    // org's deployment is indistinguishable from a missing one — 404, never
+    // 403, which would leak its existence.
+    const callerKey = deploymentKey(await resolveDeployment(req.operator?.orgId ?? null));
+    const agentKey = deploymentKey(await resolveDeployment(agent.organizationId));
+    if (callerKey !== agentKey) return reply.code(404).send({ error: "agent not found" });
 
     // Fail-closed: if the chain read rejects, the whole request 503s (see the
     // error handler in server.ts) rather than answering with indexed values.

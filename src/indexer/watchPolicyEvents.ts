@@ -37,7 +37,15 @@ export async function watchPolicyEventsFor(deployment: Deployment): Promise<void
             escalationThreshold: escalationThreshold ?? 0n,
             spentToday: 0n,
             status: "active",
+            // The registry this event came from IS the agent's deployment:
+            // policies are per-deployment, so the row's org stamp is the
+            // deployment's org (null for the global deployment). This stamp
+            // is what tenant-scopes /agents and /audit — see routes/agents.ts.
+            organizationId: deployment.orgId,
           },
+          // Deliberately unstamped: an address PK is globally unique, so if
+          // two deployments ever index the same address, update must not
+          // silently reassign the row's org on every event.
           update: {
             dailyCap: dailyCap ?? 0n,
             perTxCap: perTxCap ?? 0n,

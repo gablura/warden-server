@@ -126,7 +126,7 @@ contract HardeningTest is Test {
         vm.expectRevert(bytes("USDC settlement failed"));
         guard.requestPayment(agent, counterparty, 10 * SIX);
 
-        (, , , uint256 spent, , ) = policyRegistry.policies(agent);
+        (, , , uint256 spent, , , , ) = policyRegistry.policies(agent);
         assertEq(spent, 0, "spend must roll back with the reverted settlement");
         assertEq(auditLog.entryCount(), 0, "audit must roll back with the reverted settlement");
     }
@@ -141,14 +141,14 @@ contract HardeningTest is Test {
 
         // Well inside the agent's own caps; only the global ceiling limits it.
         spendGuard.requestPayment(agent, counterparty, 100 * SIX);
-        (, , , uint256 spent, , ) = policyRegistry.policies(agent);
+        (, , , uint256 spent, , , , ) = policyRegistry.policies(agent);
         assertEq(spent, 100 * SIX);
 
         // 100 spent + 100 more = 200 > 150 global: blocked even though the
         // agent's own daily cap allows 900 more.
         uint256 requestId = spendGuard.requestPayment(agent, counterparty, 100 * SIX);
         assertEq(requestId, 0, "should be blocked by the global ceiling");
-        (, , , uint256 spentAfter, , ) = policyRegistry.policies(agent);
+        (, , , uint256 spentAfter, , , , ) = policyRegistry.policies(agent);
         assertEq(spentAfter, 100 * SIX, "blocked payment must not record spend");
 
         // Global counter resets on the UTC day boundary like per-agent ones.
@@ -210,7 +210,7 @@ contract HardeningTest is Test {
         (, , , uint256 effectiveAt) = policyRegistry.pendingPolicy(agent);
         assertTrue(effectiveAt != 0, "increase should be scheduled");
 
-        (uint256 capNow, , , , , ) = policyRegistry.policies(agent);
+        (uint256 capNow, , , , , , , ) = policyRegistry.policies(agent);
         assertEq(capNow, 100 * SIX, "current cap must stay until applied");
 
         // Old (lower) caps keep enforcing before the delay elapses — a
@@ -228,7 +228,7 @@ contract HardeningTest is Test {
         vm.warp(effectiveAt + 1);
         policyRegistry.applyPolicy(agent); // called from the test, not the admin
 
-        (uint256 capAfter, , , , , ) = policyRegistry.policies(agent);
+        (uint256 capAfter, , , , , , , ) = policyRegistry.policies(agent);
         assertEq(capAfter, 200 * SIX);
         vm.prank(agent);
         uint256 requestId = spendGuard.requestPayment(agent, counterparty, 120 * SIX);
@@ -242,7 +242,7 @@ contract HardeningTest is Test {
         (, , , uint256 effectiveAt) = policyRegistry.pendingPolicy(agent);
         assertEq(effectiveAt, 0, "decreases must not be scheduled");
 
-        (uint256 cap, , , , , ) = policyRegistry.policies(agent);
+        (uint256 cap, , , , , , , ) = policyRegistry.policies(agent);
         assertEq(cap, 50 * SIX, "decrease applies immediately");
     }
 
@@ -254,7 +254,7 @@ contract HardeningTest is Test {
 
         vm.expectRevert(bytes("no scheduled policy change"));
         policyRegistry.applyPolicy(agent);
-        (uint256 cap, , , , , ) = policyRegistry.policies(agent);
+        (uint256 cap, , , , , , , ) = policyRegistry.policies(agent);
         assertEq(cap, 100 * SIX, "cancelled increase must never apply");
     }
 
@@ -263,34 +263,36 @@ contract HardeningTest is Test {
     // ------------------------------------------------------------------
 
     /// Two escalated requests that each fit under the daily cap alone but
-    /// not together: the FIRST approval succeeds; the SECOND must revert in
-    /// recordSpend (no fund movement, no silent over-cap), leaving the
-    /// losing request unresolved — exactly the on-chain-safe outcome.
+    /// not together: the collision now surfaces at ESCALATION time — the
+    /// second requestPayment reverts on the reservation require (cheap,
+    /// atomic, no approver gas ever spent) instead of surfacing later as a
+    /// reverted approval transaction.
     function test_Race_TwoEscalations_IndividuallyFit_CombinedDont() public {
         policyRegistry.setPolicy(agent, 100 * SIX, 100 * SIX, 40 * SIX);
         policyRegistry.setAllowlist(agent, counterparty, true);
 
-        // Escalations don't record spend, so BOTH pass checkPolicy even
-        // though 60 + 60 > 100 — the review's exact collision scenario.
+        // The first escalation reserves 60 of the 100 cap and queues.
         uint256 requestA = spendGuard.requestPayment(agent, counterparty, 60 * SIX);
-        uint256 requestB = spendGuard.requestPayment(agent, counterparty, 60 * SIX);
-        assertTrue(requestA != 0 && requestB != 0, "both should escalate");
+        assertTrue(requestA != 0, "first escalation should reserve and queue");
 
+        (, , , , , , uint256 reserved, ) = policyRegistry.policies(agent);
+        assertEq(reserved, 60 * SIX, "escalation must reserve headroom");
+
+        // The second escalation collides with the live reservation (60+60>100):
+        // reservation-aware checkPolicy BLOCKS it (recorded, refused, no funds
+        // move) before it can queue. reserve()'s require remains the backstop
+        // for concurrent requests that pass checkPolicy before either lands.
+        vm.prank(agent);
+        uint256 requestB = spendGuard.requestPayment(agent, counterparty, 60 * SIX);
+        assertEq(requestB, 0, "colliding escalation must be blocked at escalation time");
+
+        // The first request approves cleanly; its reservation converts into
+        // spend rather than double-counting.
         vm.prank(approver);
         spendGuard.approvePending(requestA);
-        (, , , uint256 spent, , ) = policyRegistry.policies(agent);
-        assertEq(spent, 60 * SIX);
-
-        vm.prank(approver2);
-        vm.expectRevert(bytes("exceeds daily cap"));
-        spendGuard.approvePending(requestB);
-
-        // The loser is untouched: still unresolved, total spend is only
-        // what actually moved.
-        (, , , bool resolvedB) = spendGuard.pending(requestB);
-        assertFalse(resolvedB);
-        (, , , uint256 spentFinal, , ) = policyRegistry.policies(agent);
-        assertEq(spentFinal, 60 * SIX);
+        (, , , uint256 spent, , , uint256 reservedAfter, ) = policyRegistry.policies(agent);
+        assertEq(spent, 60 * SIX, "approval converts the reservation into spend");
+        assertEq(reservedAfter, 0, "approval releases the reservation");
     }
 
     /// Second approval of the same request (a different approver racing the
@@ -324,7 +326,7 @@ contract HardeningTest is Test {
         uint256 second = spendGuard.requestPayment(agent, counterparty, 60 * SIX); // 60+60 > 100
         assertEq(second, 0, "second payment must be blocked by the pre-filter");
 
-        (, , , uint256 spent, , ) = policyRegistry.policies(agent);
+        (, , , uint256 spent, , , , ) = policyRegistry.policies(agent);
         assertEq(spent, 60 * SIX, "only the first payment's spend is recorded");
     }
 }

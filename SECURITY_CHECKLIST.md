@@ -95,7 +95,7 @@ git check-ignore -v cache/**/run-latest.json       # ✅ Ignored
 
 ## 🔍 Contract-Level Static Analysis (Hardening Review §5.4)
 
-Before mainnet deployment, run Slither on all four contracts (PolicyRegistry, SpendGuard, AuditLog, WardenFactory). Slither catches classes of bugs that hand-written Foundry tests often don't cover: reentrancy patterns, unchecked external calls, integer overflow in Solidity <0.8, and storage layout issues.
+Before mainnet deployment, run Slither on the three contracts (PolicyRegistry, SpendGuard, AuditLog, plus the shared AccessControlLite and ReentrancyGuard bases). Slither catches classes of bugs that hand-written Foundry tests often don't cover: reentrancy patterns, unchecked external calls, and storage layout issues.
 
 ```bash
 # Install Slither (requires Python + pip)
@@ -106,7 +106,6 @@ cd contracts
 slither src/PolicyRegistry.sol --foundry-compile-all
 slither src/SpendGuard.sol --foundry-compile-all
 slither src/AuditLog.sol --foundry-compile-all
-slither src/WardenFactory.sol --foundry-compile-all
 ```
 
 Review every finding. False positives are common — suppress them with `// slither-disable-next-line` comments in the contract with a note explaining why the finding doesn't apply. A clean Slither run is a prerequisite for any mainnet deployment.
@@ -115,15 +114,15 @@ Review every finding. False positives are common — suppress them with `// slit
 
 ### Scenario 1: "We think a key leaked"
 
-1. **Rotate immediately.** Generate new API keys (or new private keys for admin/approver wallets). Update `.env` and redeploy — the server only reads keys at boot, so a restart invalidates the old ones.
-2. **Pause the contracts.** Call `pause()` on SpendGuard and PolicyRegistry (if pause is available). If no pause function exists, coordinate an emergency upgrade or rely on the global ceiling as a circuit breaker.
+1. **Rotate immediately.** Generate new API keys (or new private keys for admin/approver wallets). Update `.env` and redeploy — the server only reads keys at boot. Note: an API key configured as a credential's `previousKey` stays accepted during the rotation grace window (see `WARDEN_API_KEYS` in `.env.example`) — drop the `previousKey` segment once clients have migrated, or immediately if the key is known-compromised.
+2. **Pause the contracts.** Call `setPaused(true)` on SpendGuard (admin-only, freezes settlement immediately). PolicyRegistry has no pause — the global daily ceiling (`setGlobalDailyCap`) is its circuit breaker.
 3. **Audit the trail.** Query `operator_actions` by `correlation_id` and timestamp to find what the compromised key did. Cross-reference with on-chain events via the tx hashes.
 4. **Rotate the wallet.** If an admin or approver *private key* leaked (not just an API key), generate a new key pair, deploy new contract instances (or transfer ownership), and update all server config.
 5. **Notify.** Alert anyone who transacted during the exposure window.
 
 ### Scenario 2: "We think a policy was set incorrectly"
 
-1. **Fix the policy.** Submit a corrective `setPolicy` transaction with the correct caps. The policy update takes effect immediately on-chain.
+1. **Fix the policy.** Submit a corrective `setPolicy` transaction with the correct caps. Decreases apply immediately; a correction that *raises* `dailyCap` goes through the 1-day timelock (`applyPolicy`) — if that delay is unacceptable during an incident, `cancelPolicyChange` is available, and tightening other knobs (perTxCap, escalationThreshold) can be done in the same call that applies immediately only when dailyCap does not increase.
 2. **Check for over-spending.** Query `/audit` and `operator_actions` for the window between the incorrect policy and the fix. If spending exceeded intent, document it.
 3. **Verify on-chain.** Read the policy from PolicyRegistry directly to confirm the correction landed.
 4. **Review the input path.** How did the wrong value get submitted? API typo? Bug in the dashboard? Add validation (e.g., a confirmation step for cap changes above a threshold) to prevent recurrence.
@@ -137,7 +136,7 @@ Review every finding. False positives are common — suppress them with `// slit
 
 ### Scenario 4: "We need to emergency-stop all settlement"
 
-1. **Pause the SpendGuard contract** via the admin function. This blocks all new payments, approvals, and rejections.
+1. **Pause the SpendGuard contract** via the admin function (`setPaused`). This freezes all money movement: new payments and approvals revert. Rejections stay available while paused by design, so approvers can empty the queue during the incident.
 2. **Stop the server.** This prevents any further API requests from reaching the contracts.
 3. **Investigate.** Use the audit log and on-chain events to understand what happened.
 4. **Do not unpause** until the root cause is identified and fixed.

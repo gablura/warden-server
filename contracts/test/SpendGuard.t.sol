@@ -95,7 +95,6 @@ contract SpendGuardTest is Test {
         100 * 10**6,
         50 * 10**6
     );
-
     policyRegistry.setAllowlist(agent, counterparty, true);
 
     // Fund the agent and grant SpendGuard the allowance the non-custodial
@@ -112,7 +111,7 @@ contract SpendGuardTest is Test {
         assertEq(requestId, 0); // Should return 0 for immediate approval
 
         // Check that spend was recorded
-        (, , , uint256 spent, , ) = policyRegistry.policies(agent);
+        (, , , uint256 spent, , , , ) = policyRegistry.policies(agent);
         assertEq(spent, amount);
 
         // Check audit log
@@ -224,7 +223,7 @@ contract SpendGuardTest is Test {
         assertTrue(resolved);
 
         // Check that spend was recorded
-        (, , , uint256 spent, , ) = policyRegistry.policies(agent);
+        (, , , uint256 spent, , , , ) = policyRegistry.policies(agent);
         assertEq(spent, amount);
 
         // Check audit log has 2 entries (escalated + approved)
@@ -268,7 +267,7 @@ contract SpendGuardTest is Test {
         assertTrue(resolved);
 
         // Check that spend was NOT recorded
-        (, , , uint256 spent, , ) = policyRegistry.policies(agent);
+        (, , , uint256 spent, , , , ) = policyRegistry.policies(agent);
         assertEq(spent, 0);
 
         // Check audit log has 2 entries (escalated + rejected)
@@ -445,7 +444,7 @@ contract SpendGuardTest is Test {
 
         // Fail-closed: the failed transfer reverted the whole request, so
         // nothing was recorded as spent and nothing was audited.
-        (, , , uint256 spent, , ) = policyRegistry.policies(agent);
+        (, , , uint256 spent, , , , ) = policyRegistry.policies(agent);
         assertEq(spent, 0);
         assertEq(auditLog.entryCount(), 0);
     }

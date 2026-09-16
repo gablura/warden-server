@@ -11,6 +11,10 @@ interface IPolicyRegistry {
         returns (bool allowed, bool needsApproval, string memory reason);
 
     function recordSpend(address agent, uint256 amount) external;
+
+    /// Escalation-time cap reservation (see PolicyRegistry.reserve).
+    function reserve(address agent, uint256 requestId, uint256 amount) external;
+    function release(address agent, uint256 requestId, uint256 amount) external;
 }
 
 interface IAuditLog {
@@ -107,6 +111,12 @@ contract SpendGuard is AccessControlLite, ReentrancyGuard {
 
         if (needsApproval) {
             requestId = ++nextRequestId;
+            // Reserve the amount against the cap NOW, not at approval time:
+            // two escalations that individually fit but collectively don't
+            // collide here (the second reverts — requestPayment is atomic,
+            // so no pending row, no audit entry, no requestId leaks out),
+            // instead of surfacing later as a reverted, gas-costing approval.
+            registry.reserve(agent, requestId, amount);
             pending[requestId] = PendingRequest(agent, counterparty, amount, false);
             auditLog.record(agent, counterparty, amount, "escalated");
             emit PaymentEscalated(requestId, agent, counterparty, amount);
@@ -129,6 +139,11 @@ contract SpendGuard is AccessControlLite, ReentrancyGuard {
         require(!r.resolved, "already resolved");
         r.resolved = true;
 
+        // Hand the reserved headroom over to recordSpend before it checks the
+        // cap, or the reservation would double-count against the approval.
+        // Defensively released (no-op when the day boundary already cleaned
+        // it up); recordSpend's require stays the final arbiter.
+        registry.release(r.agent, requestId, r.amount);
         registry.recordSpend(r.agent, r.amount);
         _settle(r.agent, r.counterparty, r.amount);
         auditLog.record(r.agent, r.counterparty, r.amount, "approved-after-escalation");
@@ -144,6 +159,11 @@ contract SpendGuard is AccessControlLite, ReentrancyGuard {
         PendingRequest storage r = pending[requestId];
         require(!r.resolved, "already resolved");
         r.resolved = true;
+
+        // Rejected requests must not keep holding cap headroom: release the
+        // reservation made at escalation time (no-op when it already
+        // expired or rolled over at the day boundary).
+        registry.release(r.agent, requestId, r.amount);
 
         auditLog.record(r.agent, r.counterparty, r.amount, "rejected-after-escalation");
         emit PendingRejected(requestId, msg.sender);

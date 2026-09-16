@@ -17,6 +17,13 @@ import "./AccessControlLite.sol";
 ///   monitoring a window to catch it. Decreases and brand-new policies
 ///   apply immediately — tightening must never have to wait, and a
 ///   first policy isn't an increase of anything.
+/// - Escalation-time reservations: an escalated request reserves its
+///   amount against the cap when it enters the queue, not when it is
+///   approved. Two escalations that individually fit but collectively
+///   don't now collide at ESCALATION time (the second is blocked, no
+///   gas wasted) instead of at approval time (a reverted transaction).
+///   Reservations expire after RESERVATION_TTL so a forgotten pending
+///   request cannot lock up headroom forever.
 contract PolicyRegistry is AccessControlLite {
     struct Policy {
         uint256 dailyCap;             // max USDC (6 decimals) an agent can move per rolling day
@@ -25,6 +32,9 @@ contract PolicyRegistry is AccessControlLite {
         uint256 spentToday;
         uint256 lastResetDay;          // block.timestamp / 1 days, for the daily counter
         bool exists;
+        // --- escalation-time reservation (see hardening notes above) ---
+        uint256 activeReserved;        // sum of live escalation reservations
+        uint256 reservedUntil;         // newest reservation's expiry timestamp
     }
 
     /// @notice A scheduled cap increase. Inert until effectiveAt passes and
@@ -48,6 +58,19 @@ contract PolicyRegistry is AccessControlLite {
     uint256 public globalSpentToday;
     uint256 public lastGlobalResetDay;
 
+    /// @notice Sum of live escalation reservations across all agents.
+    /// Counted against the global ceiling alongside globalSpentToday so N
+    /// agents can't collectively reserve past the circuit breaker. Resets
+    /// with the daily counters; a per-agent reservation that expires
+    /// mid-day keeps counting here until the day rolls over — conservative
+    /// (over-counts, never under-counts) for a safety ceiling.
+    uint256 public globalReservedToday;
+
+    /// @notice How long an escalation reservation holds headroom. A pending
+    /// request older than this no longer blocks the agent's cap; the
+    /// approval-time require in recordSpend remains the final arbiter.
+    uint256 public constant RESERVATION_TTL = 7 days;
+
     /// @notice Delay between scheduling a cap increase and it becoming
     /// applicable via applyPolicy().
     uint256 public constant CAP_CHANGE_DELAY = 1 days;
@@ -57,6 +80,8 @@ contract PolicyRegistry is AccessControlLite {
     event PolicyChangeCancelled(address indexed agent);
     event AllowlistUpdated(address indexed agent, address indexed counterparty, bool allowed);
     event GlobalDailyCapSet(uint256 cap);
+    event SpendReserved(address indexed agent, uint256 indexed requestId, uint256 amount, uint256 expiresAt);
+    event SpendReservationReleased(address indexed agent, uint256 indexed requestId, uint256 amount);
 
     constructor(address admin_) AccessControlLite(admin_) {}
 
@@ -124,9 +149,87 @@ contract PolicyRegistry is AccessControlLite {
         emit AllowlistUpdated(agent, counterparty, allowed);
     }
 
+    /// @notice Reserve `amount` of an agent's daily headroom on behalf of an
+    /// escalated request. Guard-only (SpendGuard calls this at escalation
+    /// time); fails closed when the reservation would push the agent or the
+    /// global ceiling over their caps — the second of two colliding
+    /// escalations is refused HERE, before any approval gas is ever spent.
+    /// Reverts when the agent has no policy: a reservation without a policy
+    /// would be unenforceable, and checkPolicy blocks such requests anyway.
+    ///
+    /// Each reservation lives until `block.timestamp + RESERVATION_TTL` and
+    /// releases on resolve (approve/reject) or lazily at the day boundary —
+    /// a forgotten pending request can only lock headroom for TTL days.
+    function reserve(address agent, uint256 requestId, uint256 amount) external onlyGuard {
+        Policy storage p = policies[agent];
+        require(p.exists, "no policy for agent");
+
+        uint256 today = block.timestamp / 1 days;
+        if (p.lastResetDay != today) {
+            p.spentToday = 0;
+            p.activeReserved = 0;
+            p.lastResetDay = today;
+        }
+
+        uint256 globalSpent = (lastGlobalResetDay == today) ? globalSpentToday : 0;
+        uint256 globalReserved = (lastGlobalResetDay == today) ? globalReservedToday : 0;
+
+        // Same collision math as checkPolicy, at reservation time: the
+        // reserved amount must fit alongside spend AND every reservation
+        // queued ahead of it, per agent and globally.
+        require(p.spentToday + p.activeReserved + amount <= p.dailyCap, "exceeds daily cap");
+        require(globalSpent + globalReserved + amount <= globalDailyCap, "exceeds global daily cap");
+
+        p.activeReserved += amount;
+        globalReservedToday = globalReserved + amount;
+        if (lastGlobalResetDay != today) {
+            lastGlobalResetDay = today;
+        }
+
+        uint256 expiresAt = block.timestamp + RESERVATION_TTL;
+        if (expiresAt > p.reservedUntil) {
+            p.reservedUntil = expiresAt;
+        }
+        emit SpendReserved(agent, requestId, amount, expiresAt);
+    }
+
+    /// @notice Release a previously made reservation. Guard-only; called by
+    /// SpendGuard when an escalated request is rejected (its headroom must
+    /// flow back) and when approved (recordSpend takes over the counting).
+    /// Releasing an unknown/already-released reservation is a no-op: the
+    /// approve path releases defensively and must never revert because the
+    /// day boundary already cleaned the amount up.
+    function release(address agent, uint256 requestId, uint256 amount) external onlyGuard {
+        Policy storage p = policies[agent];
+        if (!p.exists) return;
+
+        uint256 today = block.timestamp / 1 days;
+        if (p.lastResetDay != today) {
+            // Reservation belongs to a previous day — it no longer exists.
+            return;
+        }
+
+        if (amount > p.activeReserved) {
+            // Expiry/overlap already removed the amount; floor at zero.
+            p.activeReserved = 0;
+        } else {
+            p.activeReserved -= amount;
+        }
+
+        uint256 globalReserved = globalReservedToday;
+        globalReservedToday = amount > globalReserved ? 0 : globalReserved - amount;
+
+        emit SpendReservationReleased(agent, requestId, amount);
+    }
+
     /// @notice Read-only check SpendGuard calls before acting on a payment request.
     /// Does not mutate state, so two simultaneous requests can both be checked
     /// safely before either one commits spend via recordSpend().
+    ///
+    /// Reservation-aware: live reservations count against the cap here, so a
+    /// new request that would collide with a queued escalation is BLOCKED
+    /// with a reason (recorded, no funds move) instead of escalating into a
+    /// guaranteed-revert approval later.
     function checkPolicy(
         address agent,
         address counterparty,
@@ -140,13 +243,20 @@ contract PolicyRegistry is AccessControlLite {
 
         uint256 today = block.timestamp / 1 days;
         uint256 spent = (p.lastResetDay == today) ? p.spentToday : 0;
-        if (spent + amount > p.dailyCap) return (false, false, "exceeds daily cap");
+        // Reservations expire lazily: they only count while their day is
+        // current, and drop out entirely once the TTL day boundary passes.
+        // Mid-day TTL expiry under-counts headroom by design — a pending
+        // request whose reservation lapsed stops blocking new traffic, and
+        // the approval-time require in recordSpend stays the final arbiter.
+        uint256 reserved = (p.lastResetDay == today) ? p.activeReserved : 0;
+        if (spent + reserved + amount > p.dailyCap) return (false, false, "exceeds daily cap");
 
         // Hard global ceiling, above every per-agent policy. This is the
         // circuit breaker for a misconfigured policy: even a valid-looking
         // fat-fingered cap cannot push total daily outflow past it.
         uint256 globalSpent = (lastGlobalResetDay == today) ? globalSpentToday : 0;
-        if (globalSpent + amount > globalDailyCap) return (false, false, "exceeds global daily cap");
+        uint256 globalReserved = (lastGlobalResetDay == today) ? globalReservedToday : 0;
+        if (globalSpent + globalReserved + amount > globalDailyCap) return (false, false, "exceeds global daily cap");
 
         bool escalate = amount > p.escalationThreshold;
         return (true, escalate, "");
@@ -158,6 +268,10 @@ contract PolicyRegistry is AccessControlLite {
     /// checkPolicy is only a pre-filter, and two requests that both pass the
     /// pre-filter can still be executed one at a time; whichever lands second
     /// reverts here, which is what makes combined-overflow impossible.
+    ///
+    /// Reservations don't count here: the approver explicitly signed off on
+    /// this amount, so it consumes real headroom (spentToday), never the
+    /// reservation bucket. Its reservation is released by SpendGuard first.
     function recordSpend(address agent, uint256 amount) external onlyGuard {
         Policy storage p = policies[agent];
         require(p.exists, "no policy for agent");
@@ -165,6 +279,7 @@ contract PolicyRegistry is AccessControlLite {
         uint256 today = block.timestamp / 1 days;
         if (p.lastResetDay != today) {
             p.spentToday = 0;
+            p.activeReserved = 0;
             p.lastResetDay = today;
         }
 
@@ -172,6 +287,7 @@ contract PolicyRegistry is AccessControlLite {
 
         if (lastGlobalResetDay != today) {
             globalSpentToday = 0;
+            globalReservedToday = 0;
             lastGlobalResetDay = today;
         }
 

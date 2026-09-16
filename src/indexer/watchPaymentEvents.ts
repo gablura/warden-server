@@ -80,8 +80,13 @@ export async function watchPaymentEvents(): Promise<void> {
       eventName: "PendingApproved",
       onLog: async ({ args }: ProcessableLog) => {
         const { requestId, approver } = args as { requestId?: bigint; approver?: string };
+        // The chain event names only the approver; the agent comes from the
+        // indexed row so agent-scoped WS subscribers receive this too.
+        // Read BEFORE resolving: the row survives (resolved=true) but reading
+        // first keeps the broadcast's agent unambiguous about when it was set.
+        const row = await prisma.pendingRequest.findUnique({ where: { requestId: requestId! } });
         await prisma.pendingRequest.updateMany({ where: { requestId: requestId! }, data: { resolved: true } });
-        broadcast({ type: "approval_resolved", requestId: requestId?.toString(), decision: "approved", approver });
+        broadcast({ type: "approval_resolved", requestId: requestId?.toString(), decision: "approved", approver, agent: row?.agent });
       },
     },
     {
@@ -89,8 +94,10 @@ export async function watchPaymentEvents(): Promise<void> {
       eventName: "PendingRejected",
       onLog: async ({ args }: ProcessableLog) => {
         const { requestId, approver } = args as { requestId?: bigint; approver?: string };
+        // Same agent lookup as PendingApproved above.
+        const row = await prisma.pendingRequest.findUnique({ where: { requestId: requestId! } });
         await prisma.pendingRequest.updateMany({ where: { requestId: requestId! }, data: { resolved: true } });
-        broadcast({ type: "approval_resolved", requestId: requestId?.toString(), decision: "rejected", approver });
+        broadcast({ type: "approval_resolved", requestId: requestId?.toString(), decision: "rejected", approver, agent: row?.agent });
       },
     },
   ];

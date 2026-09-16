@@ -14,6 +14,15 @@ export type AgentPolicySnapshot = {
   perTxCap: bigint;
   escalationThreshold: bigint;
   spentToday: bigint;
+  /// Sum of this agent's live escalation reservations (PolicyRegistry.reserve),
+  /// day-aware like spentToday: zero when the reservation day has rolled over.
+  activeReserved: bigint;
+  /// Newest reservation's raw expiry timestamp (block.timestamp + TTL at
+  /// reserve time). Expiry is enforced lazily on-chain per day boundary; this
+  /// is informational for dashboards, not an enforcement value.
+  reservedUntil: bigint;
+  /// Cap headroom left today AFTER spend AND live reservations — the value
+  /// "can this agent still spend X right now" should be answered with.
   remainingToday: bigint;
   lastResetDay: bigint;
   currentDay: bigint;
@@ -24,8 +33,9 @@ export type AgentPolicySnapshot = {
 };
 
 /// Raw return of the `policies` auto-generated getter — struct fields in
-/// declaration order, exactly as `PolicyRegistry.Policy` defines them.
-type RawPolicy = readonly [bigint, bigint, bigint, bigint, bigint, boolean];
+/// declaration order, exactly as `PolicyRegistry.Policy` defines them
+/// (the last two fields are the escalation-reservation pair).
+type RawPolicy = readonly [bigint, bigint, bigint, bigint, bigint, boolean, bigint, bigint];
 
 function toSnapshot(
   raw: RawPolicy,
@@ -33,7 +43,7 @@ function toSnapshot(
   blockNumber: bigint,
   deploymentOrgId: string | null,
 ): AgentPolicySnapshot {
-  const [dailyCap, perTxCap, escalationThreshold, rawSpentToday, lastResetDay, exists] = raw;
+  const [dailyCap, perTxCap, escalationThreshold, rawSpentToday, lastResetDay, exists, rawReserved, reservedUntil] = raw;
 
   // An address the registry has never seen is not an error: the getter returns
   // zeroes with `exists = false`. Callers surface that rather than inventing caps.
@@ -44,6 +54,8 @@ function toSnapshot(
       perTxCap: 0n,
       escalationThreshold: 0n,
       spentToday: 0n,
+      activeReserved: 0n,
+      reservedUntil: 0n,
       remainingToday: 0n,
       lastResetDay: 0n,
       currentDay,
@@ -52,7 +64,14 @@ function toSnapshot(
     };
   }
 
-  const spentToday = lastResetDay === currentDay ? rawSpentToday : 0n;
+  // Same lazy-reset rule as checkPolicy: spend and reservations only count
+  // while their day is current.
+  const counts = lastResetDay === currentDay;
+  const spentToday = counts ? rawSpentToday : 0n;
+  const activeReserved = counts ? rawReserved : 0n;
+  // committed = spend + live reservations, i.e. everything the cap is
+  // already spoken for by. Mirrors the registry's own checkPolicy math.
+  const committed = spentToday + activeReserved;
 
   return {
     exists: true,
@@ -60,7 +79,9 @@ function toSnapshot(
     perTxCap,
     escalationThreshold,
     spentToday,
-    remainingToday: dailyCap > spentToday ? dailyCap - spentToday : 0n,
+    activeReserved,
+    reservedUntil,
+    remainingToday: dailyCap > committed ? dailyCap - committed : 0n,
     lastResetDay,
     currentDay,
     blockNumber,

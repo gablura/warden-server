@@ -25,6 +25,11 @@ function withLivePolicy(agent: Agent, policy: AgentPolicySnapshot) {
     perTxCap: policy.perTxCap,
     escalationThreshold: policy.escalationThreshold,
     spentToday: policy.spentToday,
+    // Escalation reservations (day-aware): headroom queued requests are
+    // holding, and when the newest one expires (informational).
+    activeReserved: policy.activeReserved,
+    reservedUntil: policy.reservedUntil,
+    // Cap headroom AFTER spend and live reservations.
     remainingToday: policy.remainingToday,
     lastResetDay: policy.lastResetDay,
     currentDay: policy.currentDay,
@@ -49,7 +54,11 @@ export async function agentRoutes(app: FastifyInstance) {
 
     const enriched = result.data.map((agent, index) => {
       const policy = withLivePolicy(agent, policies[index]!);
-      const spentPct = policy.dailyCap > 0n ? Number((policy.spentToday * 100n) / policy.dailyCap) : 0;
+      // "Near cap" counts COMMITTED headroom — spend plus live escalation
+      // reservations — since a queued escalation is exactly the kind of
+      // imminent spend the flag exists to surface.
+      const committed = policy.spentToday + policy.activeReserved;
+      const spentPct = policy.dailyCap > 0n ? Number((committed * 100n) / policy.dailyCap) : 0;
       return { ...policy, nearCap: spentPct >= 80 };
     });
 

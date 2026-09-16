@@ -41,7 +41,8 @@ contract PolicyRegistryTest is Test {
             uint256 et,
             uint256 spent,
             uint256 lastReset,
-            bool exists
+            bool exists,
+            ,
         ) = registry.policies(agent);
 
         assertEq(dc, dailyCap);
@@ -170,7 +171,7 @@ contract PolicyRegistryTest is Test {
         vm.prank(guard);
         registry.recordSpend(agent, 100 * 10 ** 6);
 
-        (, , , uint256 spent, uint256 lastReset, ) = registry.policies(agent);
+        (, , , uint256 spent, uint256 lastReset, , , ) = registry.policies(agent);
         assertEq(spent, 100 * 10 ** 6);
         assertEq(lastReset, block.timestamp / 1 days);
     }
@@ -210,7 +211,7 @@ contract PolicyRegistryTest is Test {
         vm.prank(guard);
         registry.recordSpend(agent, 50 * 10 ** 6);
 
-        (, , , uint256 spent, uint256 lastReset, ) = registry.policies(agent);
+        (, , , uint256 spent, uint256 lastReset, , , ) = registry.policies(agent);
         assertEq(spent, 150 * 10 ** 6);
         assertEq(lastReset, block.timestamp / 1 days);
     }
@@ -230,7 +231,7 @@ contract PolicyRegistryTest is Test {
         vm.prank(guard);
         registry.recordSpend(agent, 200 * 10 ** 6);
 
-        (, , , uint256 spent, uint256 lastReset, ) = registry.policies(agent);
+        (, , , uint256 spent, uint256 lastReset, , , ) = registry.policies(agent);
         assertEq(spent, 200 * 10 ** 6);
         assertEq(lastReset, block.timestamp / 1 days);
     }
@@ -253,7 +254,7 @@ contract PolicyRegistryTest is Test {
         vm.prank(guard);
         registry.recordSpend(agent, 300 * 10 ** 6);
 
-        (, , , uint256 spent, uint256 lastReset, ) = registry.policies(agent);
+        (, , , uint256 spent, uint256 lastReset, , , ) = registry.policies(agent);
         assertEq(spent, 300 * 10 ** 6);
         assertEq(lastReset, block.timestamp / 1 days);
     }
@@ -303,7 +304,7 @@ contract PolicyRegistryTest is Test {
         vm.prank(guard);
         registry.recordSpend(agent, 150 * 10 ** 6);
 
-        (, , , uint256 spent, uint256 lastReset, ) = registry.policies(agent);
+        (, , , uint256 spent, uint256 lastReset, , , ) = registry.policies(agent);
         assertEq(spent, 150 * 10 ** 6);
         assertEq(lastReset, (startTime + 1 days) / 1 days);
     }

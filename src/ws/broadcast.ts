@@ -56,9 +56,11 @@ export function registerClient(socket: WebSocket) {
 /// Clients with no matching subscription receive nothing.
 export function broadcast(event: unknown) {
   const payload = JSON.stringify(event);
-  // Extract the agent address from the event for scoping. Every event
-  // type emitted by the indexer includes an `agent` field — payments,
-  // policies, allowlists, and approval resolutions all name the agent.
+  // Extract the agent address from the event for scoping. Every indexer
+  // event includes an `agent` field — payments, policies, allowlists, and
+  // approval resolutions all name the agent. (approval_resolved resolves
+  // the agent from the indexed PendingRequest row; in the rare case that
+  // row is missing, the event degrades to the system-event path below.)
   const agent = extractAgent(event);
   if (agent === undefined) {
     // System events (auth_alert, etc.) go to wildcard subscribers only.

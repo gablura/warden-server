@@ -4,6 +4,13 @@ import { isAddress } from "viem";
 
 const address = z.string().refine((v) => isAddress(v), "invalid EVM address");
 
+// 0x-prefixed 20-byte private key (exactly 64 hex chars). "startsWith(0x)"
+// accepted any trailing junk and failed only later, deep in viem at first
+// use — validating the full shape here fails fast at boot instead.
+const privateKey = z
+  .string()
+  .regex(/^0x[0-9a-fA-F]{64}$/, "must be a 0x-prefixed 32-byte hex string (64 hex chars)");
+
 const schema = z.object({
   PORT: z.coerce.number().default(4000),
   CORS_ORIGIN: z.string().default("http://localhost:3000"),
@@ -13,8 +20,8 @@ const schema = z.object({
   POLICY_REGISTRY_ADDRESS: address,
   SPEND_GUARD_ADDRESS: address,
   AUDIT_LOG_ADDRESS: address,
-  ADMIN_PRIVATE_KEY: z.string().startsWith("0x"),
-  APPROVER_PRIVATE_KEY: z.string().startsWith("0x"),
+  ADMIN_PRIVATE_KEY: privateKey,
+  APPROVER_PRIVATE_KEY: privateKey,
 
   // API keys for programmatic access (service callers without Clerk
   // accounts). Per-credential identity (role:label:key, see credentials.ts)

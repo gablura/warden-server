@@ -53,6 +53,18 @@ async function withinApprovalScope(requestId: bigint, operatorMaxApproval: bigin
   }
 }
 
+/// Approval ids are on-chain uint256 counters arriving as URL strings.
+/// Parsing here (once, at the route boundary) turns a malformed id into a
+/// cheap 400 instead of an unhandled BigInt SyntaxError surfacing as a 500.
+function parseRequestId(raw: string): bigint | null {
+  if (!/^\d+$/.test(raw)) return null;
+  try {
+    return BigInt(raw);
+  } catch {
+    return null; // unreachable given the regex, kept for safety
+  }
+}
+
 type PendingRow = readonly [`0x${string}`, `0x${string}`, bigint, boolean];
 
 async function readPending(deployment: Deployment, requestId: bigint): Promise<PendingRow> {
@@ -132,31 +144,29 @@ export async function approvalRoutes(app: FastifyInstance) {
     const staleRead = indexerLag !== null && indexerLag > 0;
 
     // Make the daily-cap collision visible before anyone clicks approve.
-    // On-chain, an escalated request only touches spentToday at approval
-    // time — so two pending escalations can each "fit" alone but not
-    // together, and the loser currently finds out as a reverted, gas-
-    // costing transaction. Here, queued requests reserve headroom in
-    // createdAt order: a request fits if spentToday plus its own amount
-    // plus everything queued ahead of it stays under the live daily cap.
-    // Live caps/spend come from the same multicall path /agents uses.
+    // On-chain, an escalated request now RESERVES its headroom at escalation
+    // time (PolicyRegistry.reserve) — two escalations that individually fit
+    // but collectively don't collide at escalation time, so a queued request
+    // is over-cap only when circumstances changed after queueing (a day
+    // boundary, reservation TTL expiry, or a cap decrease, which applies
+    // immediately). wouldFitNow therefore mirrors the exact gate an approval
+    // must pass — recordSpend's `spentToday + amount <= dailyCap`, evaluated
+    // with live chain values; remainingToday is already reservation-aware
+    // (see policyState.ts). Live caps/spend come from the same multicall
+    // path /agents uses.
     const agents = [...new Set(result.data.map((r) => r.agent))];
     const policies = await readAgentPolicies(agents);
     const policyByAgent = new Map(agents.map((agent, i) => [agent, policies[i]!]));
 
-    const reserved = new Map<string, bigint>(); // agent -> amount queued ahead
     const enriched = result.data.map((request) => {
       const policy = policyByAgent.get(request.agent)!;
-      const ahead = reserved.get(request.agent) ?? 0n;
-      reserved.set(request.agent, ahead + request.amount);
-      const spentAfterAhead = policy.spentToday + ahead;
       return {
         ...request,
         remainingToday: policy.remainingToday,
         policyExists: policy.exists,
-        reservedAhead: ahead,
         // False can mean "doesn't fit" *or* "policy unreadable" — the
         // exists/policySource flags distinguish the two for clients.
-        wouldFitNow: policy.exists && spentAfterAhead + request.amount <= policy.dailyCap,
+        wouldFitNow: policy.exists && policy.spentToday + request.amount <= policy.dailyCap,
       };
     });
 
@@ -164,11 +174,10 @@ export async function approvalRoutes(app: FastifyInstance) {
   });
 
   async function resolveRequest(
-    reqId: string,
+    requestId: bigint,
     operator: { id: string; orgId?: string },
     decision: "approvePending" | "rejectPending",
   ): Promise<{ signing: SigningResult; deployment: Deployment; agent: string }> {
-    const requestId = BigInt(reqId);
     const found = await findRequestDeployment(requestId, operator.orgId);
     if (!found) {
       throw Object.assign(new Error("no such pending request on any served deployment"), { statusCode: 404, code: "not_found" });
@@ -206,12 +215,17 @@ export async function approvalRoutes(app: FastifyInstance) {
     // handler honest if the middleware wiring ever changes.
     if (!req.operator) return reply.code(500).send({ error: "internal_error", message: "operator identity missing" });
 
-    await withinApprovalScope(BigInt(req.params.id), req.operator.maxApproval);
+    const requestId = parseRequestId(req.params.id);
+    if (requestId === null) {
+      return reply.code(400).send({ error: "invalid_request", message: "approval id must be a non-negative integer" });
+    }
+
+    await withinApprovalScope(requestId, req.operator.maxApproval);
 
     try {
-      const { signing } = await resolveRequest(req.params.id, req.operator, "approvePending");
-      await recordOperatorAction(req.operator, "approve", req.params.id, signing.txHash, signing);
-      broadcast({ type: "approval_resolved", requestId: req.params.id, decision: "approved", txHash: signing.txHash, by: req.operator.id });
+      const { signing, agent } = await resolveRequest(requestId, req.operator, "approvePending");
+      await recordOperatorAction(req.operator, "approve", requestId.toString(), signing.txHash, signing);
+      broadcast({ type: "approval_resolved", requestId: requestId.toString(), decision: "approved", txHash: signing.txHash, by: req.operator.id, agent });
       return reply.send({ txHash: signing.txHash, signer: signing.signer, via: signing.via, correlationId: req.correlationId });
     } catch (err) {
       if (err instanceof AlreadyResolvedError) {
@@ -232,10 +246,15 @@ export async function approvalRoutes(app: FastifyInstance) {
   app.post<{ Params: { id: string } }>("/approvals/:id/reject", gasSpendingRoute, async (req, reply) => {
     if (!req.operator) return reply.code(500).send({ error: "internal_error", message: "operator identity missing" });
 
+    const requestId = parseRequestId(req.params.id);
+    if (requestId === null) {
+      return reply.code(400).send({ error: "invalid_request", message: "approval id must be a non-negative integer" });
+    }
+
     try {
-      const { signing } = await resolveRequest(req.params.id, req.operator, "rejectPending");
-      await recordOperatorAction(req.operator, "reject", req.params.id, signing.txHash, signing);
-      broadcast({ type: "approval_resolved", requestId: req.params.id, decision: "rejected", txHash: signing.txHash, by: req.operator.id });
+      const { signing, agent } = await resolveRequest(requestId, req.operator, "rejectPending");
+      await recordOperatorAction(req.operator, "reject", requestId.toString(), signing.txHash, signing);
+      broadcast({ type: "approval_resolved", requestId: requestId.toString(), decision: "rejected", txHash: signing.txHash, by: req.operator.id, agent });
       return reply.send({ txHash: signing.txHash, signer: signing.signer, via: signing.via, correlationId: req.correlationId });
     } catch (err) {
       if (err instanceof AlreadyResolvedError) {

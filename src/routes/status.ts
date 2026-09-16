@@ -37,12 +37,15 @@ export async function statusRoutes(app: FastifyInstance) {
     const policies = await readAgentPolicies(agents.map((a) => a.address));
     const agentHealth = agents.map((agent, i) => {
       const policy = policies[i]!;
-      const spentPct = policy.dailyCap > 0n ? Number((policy.spentToday * 100n) / policy.dailyCap) : 0;
+      // Same committed-headroom rule as /agents: spend + live reservations.
+      const committed = policy.spentToday + policy.activeReserved;
+      const spentPct = policy.dailyCap > 0n ? Number((committed * 100n) / policy.dailyCap) : 0;
       return {
         address: agent.address,
         label: agent.label,
         status: agent.status,
         spentToday: policy.spentToday,
+        activeReserved: policy.activeReserved,
         dailyCap: policy.dailyCap,
         spentPct,
         nearCap: spentPct >= 80,

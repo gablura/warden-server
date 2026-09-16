@@ -14,10 +14,18 @@ import { deploymentKey, listServedDeployments, type Deployment } from "../chain/
 ///
 /// Processing runs through indexer/runner.ts (idempotent, checkpointed,
 /// backfilled on restart).
+
+/// Canonical indexer-checkpoint name for a policy watcher on a deployment.
+/// Shared with route code that reads lag (see /status) so the scoped and
+/// indexing sides can never drift apart — the same pattern as
+/// paymentCheckpointName in watchPaymentEvents.ts.
+export function policyCheckpointName(deploymentKey: string, event: string): string {
+  return deploymentKey === "global" ? `policies:${event}` : `org:${deploymentKey}:policies:${event}`;
+}
+
 export async function watchPolicyEventsFor(deployment: Deployment): Promise<void> {
   const key = deploymentKey(deployment);
-  const checkpointPrefix = key === "global" ? "" : `org:${key}:`;
-  const watcherName = (event: string) => `${checkpointPrefix}policies:${event}`;
+  const watcherName = (event: string) => policyCheckpointName(key, event);
 
   const watchers = [
     {

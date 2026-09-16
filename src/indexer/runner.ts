@@ -54,9 +54,10 @@ export interface ProcessableLog {
 type LogHandler = (log: ProcessableLog) => Promise<void>;
 
 interface WatcherConfig {
-  /// Stable checkpoint key. MUST be deployment-scoped, e.g.
-  /// "payments:PaymentApproved" on the global deployment or
-  /// "org:<id>:payments:PaymentApproved" for a per-org deployment —
+  /// Stable checkpoint key. MUST be deployment-scoped — e.g.
+  /// paymentCheckpointName("global", "PaymentApproved") →
+  /// "payments:PaymentApproved" on the global deployment, or
+  /// "org:<deploymentKey>:payments:PaymentApproved" for a per-org one —
   /// blocks are per-chain, so a shared key would let one deployment's
   /// progress corrupt another's backfill.
   name: string;

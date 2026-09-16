@@ -91,6 +91,16 @@ model OperatorAction {
   subjectId     String   @map("subject_id")
   txHash        String?  @map("tx_hash")
   correlationId String?  @map("correlation_id")
+  // The embedded wallet address of the human who triggered the action, when
+  // known (Clerk-authenticated users). Binds the server-side audit row to
+  // the specific person's key — the "who approved this" half of the wallet
+  // layer. Null for API-key callers, which have no wallet.
+  walletAddress String?  @map("wallet_address")
+  // The actual on-chain msg.sender and how it signed: "circle" (the
+  // person's embedded wallet via Circle) or "relayer" (server-held key).
+  // Together with walletAddress this answers "whose key signed" exactly.
+  signerAddress String?  @map("signer_address")
+  signingVia    String?  @map("signing_via")
   createdAt     DateTime @default(now()) @map("created_at")
 
   @@index([createdAt])
@@ -114,32 +124,28 @@ model Allowlist {
 
 /// A human user. Authenticated via Clerk (Google OAuth, etc.).
 /// Roles are per-organization via Membership, not global on this model.
+///
+/// Wallet model (see src/auth/wallet.ts): every user gets exactly one
+/// embedded Circle wallet (`walletAddress`/`walletId`, both unique and
+/// nullable until provisioning completes). No seed phrase is ever shown
+/// or stored — the user authorizes via their Circle PIN/passkey through
+/// the frontend SDK. `externalWalletAddress` is an optional user-linked
+/// wallet/multisig (Fireblocks, Safe) used as an add-on, never as a
+/// replacement for the embedded wallet.
 model User {
-  id            String   @id @default(cuid())
-  clerkId       String?  @unique
-  email         String   @unique
-  label         String?
-  walletAddress String?  @unique
-  walletId      String?  @unique
-  createdAt     DateTime @default(now()) @map("created_at")
-  updatedAt     DateTime @updatedAt @map("updated_at")
+  id                   String   @id @default(cuid())
+  clerkId              String?  @unique
+  email                String   @unique
+  label                String?
+  walletAddress        String?  @unique
+  walletId             String?  @unique
+  externalWalletAddress String? @map("external_wallet_address")
+  createdAt            DateTime @default(now()) @map("created_at")
+  updatedAt            DateTime @updatedAt @map("updated_at")
 
-  nonces     Nonce[]
   memberships Membership[]
 
   @@map("users")
-}
-
-model Nonce {
-  id        String   @id @default(cuid())
-  userId    String   @map("user_id")
-  nonce     String   @unique
-  used      Boolean  @default(false)
-  expiresAt DateTime @map("expires_at")
-  createdAt DateTime @default(now()) @map("created_at")
-  user      User     @relation(fields: [userId], references: [id])
-
-  @@map("nonces")
 }
 
 // ---------------------------------------------------------------------------
@@ -156,16 +162,28 @@ model Organization {
   slug      String   @unique
   verified  Boolean  @default(false)
 
-  // Mainnet contract addresses — populated after verification.
+  // Mainnet deployment — populated after verification. The three contract
+  // addresses plus the RPC URL/chain id form one complete unit: an org uses
+  // its own deployment only when ALL FIVE are set (see
+  // chain/orgContracts.ts). Partial config never silently routes to the
+  // global deployment — it fails closed.
   mainnetPolicyRegistry String? @map("mainnet_policy_registry")
   mainnetSpendGuard     String? @map("mainnet_spend_guard")
   mainnetAuditLog       String? @map("mainnet_audit_log")
+  mainnetRpcUrl         String? @map("mainnet_rpc_url")
+  mainnetChainId        Int?    @map("mainnet_chain_id")
+
+  // Optional org-level treasury wallet/multisig (Fireblocks, Safe) linked
+  // as an add-on for treasury-level actions. Never replaces the per-person
+  // embedded wallets used for individual approvals.
+  treasuryWallet String? @map("treasury_wallet")
 
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
 
   memberships Membership[]
   agents      Agent[]
+  invitations Invitation[]
 
   @@map("organizations")
 }
@@ -186,4 +204,31 @@ model Membership {
 
   @@unique([userId, organizationId])
   @@map("memberships")
+}
+
+/// An invitation for an email address to join an organization with a
+/// specific role (defaulting to `viewer` when the inviter doesn't say).
+/// Accepting an invite creates a Membership — and only a Membership (see
+/// §4 of the auth architecture: nothing here grants on-chain permissions).
+///
+/// Invites are token-based so joining works with or without Clerk email
+/// delivery: the invite link carries `token`, and any pending (unexpired,
+/// unaccepted) invite matching a user's email is also claimed automatically
+/// on their next login.
+model Invitation {
+  id             String    @id @default(cuid())
+  organizationId String    @map("organization_id")
+  email          String
+  role           String    @default("viewer")
+  token          String    @unique
+  expiresAt      DateTime  @map("expires_at")
+  acceptedAt     DateTime? @map("accepted_at")
+  createdById    String?   @map("created_by")
+  createdAt      DateTime  @default(now()) @map("created_at")
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId])
+  @@index([email])
+  @@map("invitations")
 }

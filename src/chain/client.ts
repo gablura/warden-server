@@ -1,8 +1,12 @@
-import { createPublicClient, createWalletClient, defineChain, http, getContract } from "viem";
+import { createPublicClient, defineChain, http } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { config } from "../config.js";
-import { policyRegistryAbi } from "./abis/policyRegistry.js";
-import { spendGuardAbi } from "./abis/spendGuard.js";
+
+// Global (env) deployment surface. Per-org deployments live in
+// chain/orgContracts.ts; per-call contract bindings are built in
+// chain/signing.ts and chain/policyState.ts. This module keeps only what
+// is inherently global: the chain definition, the shared read client
+// (indexer, queue view, status), and the relayer identities for audit rows.
 
 // Replace with Arc's published chain definition once you have it —
 // this is a placeholder shape. USDC as native gas is the detail worth
@@ -23,22 +27,9 @@ export const arc = defineChain({
 
 export const publicClient = createPublicClient({ chain: arc, transport: http(config.ARC_RPC_URL) });
 
+// Relayer identities (used for audit rows on the relayer signing path).
+// Addresses are derived, never secret.
 const adminAccount = privateKeyToAccount(config.ADMIN_PRIVATE_KEY as `0x${string}`);
 const approverAccount = privateKeyToAccount(config.APPROVER_PRIVATE_KEY as `0x${string}`);
-
-export const adminWalletClient = createWalletClient({ account: adminAccount, chain: arc, transport: http(config.ARC_RPC_URL) });
-export const approverWalletClient = createWalletClient({ account: approverAccount, chain: arc, transport: http(config.ARC_RPC_URL) });
-
-// ABIs are generated from the compiled Foundry artifacts — see
-// scripts/generate-abis.mjs and run `npm run abis:generate` after any
-// contract change. Imported rather than hand-trimmed so a signature
-// drift is a type error here instead of a bad calldata at runtime.
-export const policyRegistry = {
-  read: getContract({ address: config.POLICY_REGISTRY_ADDRESS as `0x${string}`, abi: policyRegistryAbi, client: publicClient }),
-  admin: getContract({ address: config.POLICY_REGISTRY_ADDRESS as `0x${string}`, abi: policyRegistryAbi, client: adminWalletClient }),
-};
-
-export const spendGuard = {
-  read: getContract({ address: config.SPEND_GUARD_ADDRESS as `0x${string}`, abi: spendGuardAbi, client: publicClient }),
-  approver: getContract({ address: config.SPEND_GUARD_ADDRESS as `0x${string}`, abi: spendGuardAbi, client: approverWalletClient }),
-};
+export const adminAddress = adminAccount.address;
+export const approverAddress = approverAccount.address;

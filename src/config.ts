@@ -16,12 +16,15 @@ const schema = z.object({
   ADMIN_PRIVATE_KEY: z.string().startsWith("0x"),
   APPROVER_PRIVATE_KEY: z.string().startsWith("0x"),
 
-  // API keys for programmatic access (agents, bots).
-  // These remain separate from Clerk — agents don't have Clerk accounts.
+  // API keys for programmatic access (service callers without Clerk
+  // accounts). Per-credential identity (role:label:key, see credentials.ts)
+  // — the old shared ADMIN/APPROVER_API_KEY pair was removed as part of the
+  // session→API auth migration (§6): shared static secrets no longer exist.
   WARDEN_API_KEYS: z.string().optional(),
-  // Legacy keys — still accepted when WARDEN_API_KEYS is unset.
-  ADMIN_API_KEY: z.string().min(32).optional(),
-  APPROVER_API_KEY: z.string().min(32).optional(),
+
+  // Network the server's contracts live on. Testnet is ungated by design
+  // (exploration); on mainnet the production gate requires verified orgs.
+  WARDEN_NETWORK: z.enum(["testnet", "mainnet"]).default("testnet"),
 
   // Clerk — human auth (Google OAuth, org management, roles).
   CLERK_SECRET_KEY: z.string().optional(),
@@ -34,12 +37,13 @@ const schema = z.object({
   CIRCLE_BLOCKCHAIN: z.string().default("ETH-SEPOLIA"),
   CIRCLE_USDC_TOKEN_ID: z.string().optional(),
 
-  // JWT signing — session tokens for authenticated humans.
-  // Used when Clerk is not configured (fallback mode).
-  JWT_SECRET: z.string().min(32).optional(),
+  // JWT signing — scoped session tokens (POST /auth/token, §6).
+  // Always required: even Clerk-only deploys mint short-lived org-scoped
+  // tokens from Clerk sessions, so the signing key must exist at boot.
+  JWT_SECRET: z.string().min(32),
 }).superRefine((cfg, ctx) => {
   // Either API keys or Clerk must be present.
-  const hasApiKeys = cfg.WARDEN_API_KEYS || (cfg.ADMIN_API_KEY && cfg.APPROVER_API_KEY);
+  const hasApiKeys = !!cfg.WARDEN_API_KEYS;
   const hasClerk = !!cfg.CLERK_SECRET_KEY;
 
   if (!hasApiKeys && !hasClerk) {
@@ -60,14 +64,6 @@ const schema = z.object({
     });
   }
 
-  // JWT — required when Clerk is NOT configured (fallback mode).
-  if (!hasClerk && !cfg.JWT_SECRET) {
-    ctx.addIssue({
-      code: z.ZodIssueCode.custom,
-      message: "JWT_SECRET is required when CLERK_SECRET_KEY is not set",
-      path: ["JWT_SECRET"],
-    });
-  }
 });
 
 export const config = schema.parse(process.env);

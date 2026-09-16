@@ -122,19 +122,12 @@ const toCredential = (entry: { role: Role; label: string; key: string; previousK
 function parseRegistry(): Credential[] {
   const entries: { role: Role; label: string; key: string; previousKey?: string; maxApproval?: bigint }[] = [];
 
+  // Clerk-only deploys set no API keys at all — service auth is then
+  // simply absent (every human authenticates via Clerk/scoped tokens).
   const declared = config.WARDEN_API_KEYS?.trim();
   if (declared) {
     const parsed = credentialsSchema.parse(declared.split(",").map((s) => s.trim()).filter(Boolean));
     entries.push(...parsed);
-  } else {
-    // Backward compatibility: the pre-registry ADMIN_API_KEY / APPROVER_API_KEY
-    // keep working, attributed to "legacy" identities. Mark them clearly so
-    // audit rows make it obvious the request came from a shared key, and so
-    // the migration to named credentials is visible in the data.
-    // superRefine in config.ts guarantees both legacy keys are present
-    // whenever WARDEN_API_KEYS is unset, so these are safe.
-    entries.push({ role: "admin", label: "legacy-admin", key: config.ADMIN_API_KEY! });
-    entries.push({ role: "approver", label: "legacy-approver", key: config.APPROVER_API_KEY! });
   }
 
   const credentials = entries.map(toCredential);

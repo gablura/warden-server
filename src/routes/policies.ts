@@ -1,10 +1,11 @@
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { isAddress } from "viem";
-import { policyRegistry } from "../chain/client.js";
-import { serializeTx } from "../chain/txQueue.js";
+import { submitAsAdmin } from "../chain/signing.js";
+import { resolveDeploymentForAgent } from "../chain/orgContracts.js";
 import { prisma } from "../db/client.js";
 import { requireRole } from "../auth/clerkAuth.js";
+import { productionGate } from "../auth/productionGate.js";
 import { getCorrelationId } from "../auth/correlation.js";
 
 const addressField = z.string().refine((v) => isAddress(v), "invalid EVM address");
@@ -22,11 +23,17 @@ const setAllowlistBody = z.object({
   allowed: z.boolean(),
 }).strict();
 
-// Both routes require the admin role (see auth/clerkAuth.ts) and
-// are rate-limited independently of the server-wide default, since
-// each successful call sends a real transaction and costs real gas.
+// Both routes require the admin role (see auth/clerkAuth.ts), pass the
+// production gate (verified orgs on mainnet, open on testnet), and are
+// rate-limited independently of the server-wide default, since each
+// successful call sends a real transaction and costs real gas.
+//
+// setPolicy/setAllowlist are admin-only on-chain, so the tx always comes
+// from the admin relayer on the AGENT's deployment (its org's contracts on
+// mainnet, global otherwise) — per-person identity is carried by the scoped
+// session + audit row. See signing.submitAsAdmin.
 const gasSpendingRoute = {
-  preHandler: requireRole("admin"),
+  preHandler: [requireRole("admin"), productionGate()],
   config: { rateLimit: { max: 20, timeWindow: "1 minute" } },
 };
 
@@ -34,10 +41,10 @@ const gasSpendingRoute = {
 // the on-chain AuditLog can't name the credential that requested the
 // change, so the operator_actions table records it, tied to the tx hash.
 async function recordOperatorAction(
-  operator: { id: string; label: string; role: string },
+  operator: { id: string; label: string; role: string; walletAddress?: string },
   action: string,
   subjectId: string,
-  txHash: string,
+  signing: { txHash: string; signer: string; via: string },
 ) {
   await prisma.operatorAction.create({
     data: {
@@ -46,8 +53,11 @@ async function recordOperatorAction(
       role: operator.role,
       action,
       subjectId,
-      txHash,
+      txHash: signing.txHash,
       correlationId: getCorrelationId() ?? null,
+      walletAddress: operator.walletAddress ?? null,
+      signerAddress: signing.signer,
+      signingVia: signing.via,
     },
   });
 }
@@ -56,26 +66,22 @@ export async function policyRoutes(app: FastifyInstance) {
   app.post("/policies", gasSpendingRoute, async (req, reply) => {
     if (!req.operator) return reply.code(500).send({ error: "internal_error", message: "operator identity missing" });
     const body = setPolicyBody.parse(req.body);
-    // Serialized per wallet (see txQueue.ts) so two concurrent admin calls
-    // can't collide on the same nonce.
-    const hash = await serializeTx("admin", () =>
-      policyRegistry.admin.write.setPolicy([
-        body.agent as `0x${string}`, body.dailyCap, body.perTxCap, body.escalationThreshold,
-      ]),
-    );
-    await recordOperatorAction(req.operator, "set_policy", body.agent.toLowerCase(), hash);
-    return reply.send({ txHash: hash, correlationId: req.correlationId });
+    const deployment = await resolveDeploymentForAgent(body.agent);
+    const signing = await submitAsAdmin(deployment, "policyRegistry", "setPolicy", [
+      body.agent as `0x${string}`, body.dailyCap, body.perTxCap, body.escalationThreshold,
+    ]);
+    await recordOperatorAction(req.operator, "set_policy", body.agent.toLowerCase(), signing);
+    return reply.send({ txHash: signing.txHash, signer: signing.signer, via: signing.via, correlationId: req.correlationId });
   });
 
   app.post("/policies/allowlist", gasSpendingRoute, async (req, reply) => {
     if (!req.operator) return reply.code(500).send({ error: "internal_error", message: "operator identity missing" });
     const body = setAllowlistBody.parse(req.body);
-    const hash = await serializeTx("admin", () =>
-      policyRegistry.admin.write.setAllowlist([
-        body.agent as `0x${string}`, body.counterparty as `0x${string}`, body.allowed,
-      ]),
-    );
-    await recordOperatorAction(req.operator, "set_allowlist", `${body.agent.toLowerCase()}:${body.counterparty.toLowerCase()}`, hash);
-    return reply.send({ txHash: hash, correlationId: req.correlationId });
+    const deployment = await resolveDeploymentForAgent(body.agent);
+    const signing = await submitAsAdmin(deployment, "policyRegistry", "setAllowlist", [
+      body.agent as `0x${string}`, body.counterparty as `0x${string}`, body.allowed,
+    ]);
+    await recordOperatorAction(req.operator, "set_allowlist", `${body.agent.toLowerCase()}:${body.counterparty.toLowerCase()}`, signing);
+    return reply.send({ txHash: signing.txHash, signer: signing.signer, via: signing.via, correlationId: req.correlationId });
   });
 }

@@ -2,6 +2,7 @@ import type { FastifyInstance } from "fastify";
 import { Webhook } from "svix";
 import { prisma } from "../db/client.js";
 import { config } from "../config.js";
+import { claimPendingInvites, normalizeEmail } from "../auth/invites.js";
 
 // ── Clerk Webhook Events ─────────────────────────────────────────────
 //
@@ -102,7 +103,7 @@ async function handleUserEvent(event: ClerkWebhookEvent) {
   const lastName = data.last_name as string | undefined;
   const label = [firstName, lastName].filter(Boolean).join(" ") || email?.split("@")[0];
 
-  await prisma.user.upsert({
+  const user = await prisma.user.upsert({
     where: { clerkId },
     create: {
       clerkId,
@@ -114,6 +115,18 @@ async function handleUserEvent(event: ClerkWebhookEvent) {
       label,
     },
   });
+
+  // Users created via Clerk's dashboard never hit the JWT first-login path,
+  // so claim their pending invites here too. Wallet provisioning stays on
+  // the request paths (resolveClerkOperator, /auth/me) so a Circle outage
+  // can never fail webhook delivery. Best-effort: never throw.
+  if (email) {
+    try {
+      await claimPendingInvites(user.id, normalizeEmail(email));
+    } catch {
+      // ignore — /auth/me and the invite-accept endpoint retry
+    }
+  }
 }
 
 async function handleUserDeleted(event: ClerkWebhookEvent) {

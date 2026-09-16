@@ -3,6 +3,9 @@ import crypto from "node:crypto";
 import { config } from "../config.js";
 import { prisma } from "../db/client.js";
 import { findCredential } from "./credentials.js";
+import { verifyScopedToken, type ScopedTokenClaims } from "./jwt.js";
+import { ensureUserWallet } from "./wallet.js";
+import { claimPendingInvites } from "./invites.js";
 import { verifyRequestSignature, type SignatureFailure } from "./requestSignature.js";
 import { recordAuthFailure } from "./failureAlert.js";
 import { generateCorrelationId } from "./correlation.js";
@@ -125,31 +128,41 @@ function signatureRejection(req: FastifyRequest, reply: FastifyReply, role: stri
 
 type AuthResult =
   | { kind: "clerk"; userId: string; sessionId?: string; orgId?: string; orgRole?: string }
+  | { kind: "scoped"; claims: ScopedTokenClaims }
   | { kind: "api_key"; operator: Operator }
   | { kind: "none" };
 
 async function extractAuth(req: FastifyRequest): Promise<AuthResult> {
   const authHeader = req.headers.authorization;
 
-  // ── Bearer token: Clerk JWT or API key ─────────────────────────────
+  // ── Bearer token: Clerk JWT, scoped session token, or API key ──────
   if (authHeader?.startsWith("Bearer ")) {
     const token = authHeader.slice(7);
 
-    // Try Clerk JWT verification
-    if (config.CLERK_SECRET_KEY && token.split(".").length === 3) {
-      const payload = await verifyClerkJwt(token);
-      if (payload) {
-        return {
-          kind: "clerk",
-          userId: payload.sub,
-          sessionId: payload.sid,
-          orgId: payload.org_id,
-          orgRole: payload.org_role,
-        };
+    if (token.split(".").length === 3) {
+      // Try Clerk JWT verification
+      if (config.CLERK_SECRET_KEY) {
+        const payload = await verifyClerkJwt(token);
+        if (payload) {
+          return {
+            kind: "clerk",
+            userId: payload.sub,
+            sessionId: payload.sid,
+            orgId: payload.org_id,
+            orgRole: payload.org_role,
+          };
+        }
+      }
+
+      // Try short-lived org-scoped token (POST /auth/token, §6). Checked
+      // after Clerk so a Clerk session can never be mistaken for a scope.
+      const scoped = verifyScopedToken(token);
+      if (scoped) {
+        return { kind: "scoped", claims: scoped };
       }
     }
 
-    // Try API key (raw key or role:label:key format)
+    // Try API key (service callers without Clerk accounts)
     if (token.length >= 32) {
       const adminMatch = findCredential("admin", token);
       if (adminMatch) return { kind: "api_key", operator: adminMatch };
@@ -206,6 +219,30 @@ async function resolveClerkOperator(
         label: email.split("@")[0],
       },
     });
+
+    // First login: attach any pending invites for this email (join-via-link
+    // works even when the invite was sent before the account existed), then
+    // provision the embedded wallet. Both are best-effort and must never
+    // fail authentication — the next request retries.
+    try {
+      await claimPendingInvites(user.id, user.email);
+    } catch {
+      // ignore — /auth/me and the invite-accept endpoint retry
+    }
+  }
+
+  // Lazy wallet provisioning: only fires while the record has no wallet,
+  // so the hot path stays a pure DB read once provisioned. A Circle outage
+  // is swallowed here — the next request retries.
+  if (!user.walletAddress || !user.walletId) {
+    try {
+      const wallet = await ensureUserWallet(user.id);
+      if (wallet) {
+        user = { ...user, walletId: wallet.walletId, walletAddress: wallet.address };
+      }
+    } catch {
+      // ignore — retry on the next request
+    }
   }
 
   // If orgId provided, resolve membership role
@@ -246,13 +283,18 @@ async function resolveClerkOperator(
 
 // ── requireRole middleware ─────────────────────────────────────────────
 //
-// Supports three auth methods:
-//   1. Clerk session JWT: identifies user, resolves org membership
-//   2. API key: x-api-key header → findCredential (existing behavior)
-//   3. None: rejected
+// Supports four auth methods:
+//   1. Scoped session token (§6): short-lived, bound to (user, org, role).
+//      Identity + role come straight from verified claims.
+//   2. Clerk session JWT: identifies user, resolves org membership live.
+//   3. API key: x-api-key header or Bearer → findCredential. Service
+//      callers only — humans use 1 or 2.
+//   4. None: rejected
 //
-// The `orgId` query parameter scopes to a specific org.
-// If not provided, the user's highest role across all orgs is used.
+// The `orgId` query parameter scopes Clerk-JWT callers to a specific org
+// (falling back to the highest role across orgs when absent). Scoped
+// tokens are already org-bound: a request naming a *different* orgId is
+// rejected rather than re-scoped.
 
 export function requireRole(role: "admin" | "approver" | "viewer") {
   return async function requireRoleHandler(req: FastifyRequest, reply: FastifyReply) {
@@ -260,6 +302,37 @@ export function requireRole(role: "admin" | "approver" | "viewer") {
     req.correlationId = correlationId;
 
     const auth = await extractAuth(req);
+
+    // ── Scoped token path (§6) ────────────────────────────────────────
+    if (auth.kind === "scoped") {
+      const { claims } = auth;
+      const requestedOrgId = (req.query as Record<string, string>)?.orgId as string | undefined;
+      if (requestedOrgId !== undefined && requestedOrgId !== claims.orgId) {
+        req.log.warn({ role, ip: req.ip }, "rejected scoped token used for a different org");
+        return reject(req, reply, 403, "token is scoped to a different organization");
+      }
+
+      // Check role hierarchy: owner > admin > approver > viewer
+      const hierarchy = ["owner", "admin", "approver", "viewer"];
+      const userLevel = hierarchy.indexOf(claims.role);
+      const requiredLevel = hierarchy.indexOf(role);
+
+      // Unknown roles fail closed (indexOf -1 would otherwise outrank owner).
+      if (userLevel < 0 || userLevel > requiredLevel) {
+        req.log.warn({ role, tokenRole: claims.role, ip: req.ip }, "rejected: insufficient token role");
+        return reject(req, reply, 403, "insufficient permissions");
+      }
+
+      req.operator = {
+        id: claims.sub,
+        label: claims.email,
+        role: claims.role,
+        orgId: claims.orgId,
+        orgRole: claims.role,
+        walletAddress: claims.walletAddress,
+      };
+      return;
+    }
 
     // ── Clerk auth path ──────────────────────────────────────────────
     if (auth.kind === "clerk") {
@@ -269,12 +342,14 @@ export function requireRole(role: "admin" | "approver" | "viewer") {
         return reject(req, reply, 401, "user not found or not a member of this organization");
       }
 
-      // Check role hierarchy: owner > admin > approver > viewer
+      // Check role hierarchy: owner > admin > approver > viewer.
+      // Unknown role strings fail closed: indexOf returns -1, which would
+      // otherwise sort above owner and grant everything.
       const hierarchy = ["owner", "admin", "approver", "viewer"];
       const userLevel = hierarchy.indexOf(operator.orgRole ?? "viewer");
       const requiredLevel = hierarchy.indexOf(role);
 
-      if (userLevel > requiredLevel) {
+      if (userLevel < 0 || userLevel > requiredLevel) {
         req.log.warn({ role, orgRole: operator.orgRole, ip: req.ip }, "rejected: insufficient org role");
         return reject(req, reply, 403, "insufficient permissions");
       }

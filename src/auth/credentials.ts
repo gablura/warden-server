@@ -29,10 +29,14 @@ export interface Operator {
   /// Stable identifier used in audit rows — the label, lowercased.
   id: string;
   label: string;
-  role: Role;
+  role: string;
   /// Approval ceiling in base units, approver credentials only.
   /// undefined means unscoped.
   maxApproval?: bigint;
+  /// Organization context (Clerk users only).
+  orgId?: string;
+  orgRole?: string;
+  walletAddress?: string;
 }
 
 interface Credential extends Operator {

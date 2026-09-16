@@ -4,7 +4,7 @@ import { spendGuard, publicClient } from "../chain/client.js";
 import { serializeTx } from "../chain/txQueue.js";
 import { readAgentPolicies } from "../chain/policyState.js";
 import { broadcast } from "../ws/broadcast.js";
-import { requireRole } from "../auth/apiKeyAuth.js";
+import { requireRole } from "../auth/clerkAuth.js";
 import { limitQuerySchema, paginatedQuery } from "../db/pagination.js";
 import { getCorrelationId } from "../auth/correlation.js";
 

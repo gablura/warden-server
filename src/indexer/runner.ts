@@ -24,9 +24,9 @@ import { prisma } from "../db/client.js";
 ///    restart-gap the review flagged. First boot records the current head
 ///    as the baseline, matching the previous live-only behavior.
 
-const BACKFILL_CHUNK = 2_000n;
-const BACKFILL_CHUNK_DELAY_MS = 400;
-const BACKFILL_RETRY_DELAY_MS = 2_000;
+const BACKFILL_CHUNK = 500n;
+const BACKFILL_CHUNK_DELAY_MS = 800;
+const BACKFILL_RETRY_DELAY_MS = 4_000;
 
 // Backfills from all watchers share one serialized queue with a pause
 // between chunks. First boot or a long gap can mean many watchers each
@@ -110,7 +110,7 @@ async function backfill(cfg: WatcherConfig) {
   while (from <= head) {
     const to = from + BACKFILL_CHUNK - 1n > head ? head : from + BACKFILL_CHUNK - 1n;
     let processed = false;
-    for (let attempt = 1; attempt <= 3 && !processed; attempt++) {
+    for (let attempt = 1; attempt <= 5 && !processed; attempt++) {
       try {
         const logs = await publicClient.getContractEvents({
           address: cfg.address,
@@ -122,8 +122,8 @@ async function backfill(cfg: WatcherConfig) {
         await processBatch(cfg, logs as unknown as ProcessableLog[]);
         processed = true;
       } catch (err) {
-        if (attempt === 3) {
-          console.error(`[${cfg.name}] backfill failed for blocks ${from}-${to} after 3 attempts:`, err);
+        if (attempt === 5) {
+          console.error(`[${cfg.name}] backfill failed for blocks ${from}-${to} after 5 attempts:`, err);
           return; // Checkpoint is still behind; the next boot retries this range.
         }
         await delay(BACKFILL_RETRY_DELAY_MS * attempt);

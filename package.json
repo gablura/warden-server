@@ -14,6 +14,7 @@
     "db:studio": "prisma studio"
   },
   "dependencies": {
+    "@clerk/backend": "^3.17.2",
     "@fastify/cors": "^10.0.0",
     "@fastify/rate-limit": "^11.2.0",
     "@fastify/websocket": "^11.0.0",
@@ -22,6 +23,7 @@
     "dotenv": "^16.4.5",
     "fastify": "^5.0.0",
     "pg": "^8.13.0",
+    "svix": "^2.5.0",
     "viem": "^2.21.0",
     "zod": "^3.23.8"
   },

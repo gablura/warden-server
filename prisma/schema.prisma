@@ -12,6 +12,7 @@ generator client {
 
 model Agent {
   address             String   @id
+  organizationId      String?  @map("organization_id")
   label               String?
   dailyCap            BigInt   @map("daily_cap")
   perTxCap            BigInt   @map("per_tx_cap")
@@ -20,6 +21,8 @@ model Agent {
   status              String   @default("active")
   createdAt           DateTime @default(now()) @map("created_at")
   updatedAt           DateTime @updatedAt @map("updated_at")
+
+  organization Organization? @relation(fields: [organizationId], references: [id])
 
   @@map("agents")
 }
@@ -103,4 +106,84 @@ model Allowlist {
 
   @@id([agent, counterparty])
   @@map("allowlist")
+}
+
+// ---------------------------------------------------------------------------
+// Human auth: Clerk + Circle embedded wallets
+// ---------------------------------------------------------------------------
+
+/// A human user. Authenticated via Clerk (Google OAuth, etc.).
+/// Roles are per-organization via Membership, not global on this model.
+model User {
+  id            String   @id @default(cuid())
+  clerkId       String?  @unique
+  email         String   @unique
+  label         String?
+  walletAddress String?  @unique
+  walletId      String?  @unique
+  createdAt     DateTime @default(now()) @map("created_at")
+  updatedAt     DateTime @updatedAt @map("updated_at")
+
+  nonces     Nonce[]
+  memberships Membership[]
+
+  @@map("users")
+}
+
+model Nonce {
+  id        String   @id @default(cuid())
+  userId    String   @map("user_id")
+  nonce     String   @unique
+  used      Boolean  @default(false)
+  expiresAt DateTime @map("expires_at")
+  createdAt DateTime @default(now()) @map("created_at")
+  user      User     @relation(fields: [userId], references: [id])
+
+  @@map("nonces")
+}
+
+// ---------------------------------------------------------------------------
+// Multi-tenancy: Organizations + Memberships
+// ---------------------------------------------------------------------------
+
+/// A company/team using Warden. Owns its own agents and policies.
+/// The `verified` flag gates production/mainnet access — testnet is
+/// available immediately, real money requires review.
+model Organization {
+  id        String   @id @default(cuid())
+  clerkId   String   @unique
+  name      String
+  slug      String   @unique
+  verified  Boolean  @default(false)
+
+  // Mainnet contract addresses — populated after verification.
+  mainnetPolicyRegistry String? @map("mainnet_policy_registry")
+  mainnetSpendGuard     String? @map("mainnet_spend_guard")
+  mainnetAuditLog       String? @map("mainnet_audit_log")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  memberships Membership[]
+  agents      Agent[]
+
+  @@map("organizations")
+}
+
+/// Join table: a user belongs to an organization with a specific role.
+/// Roles: owner, admin, approver, viewer.
+/// The same person can be an Admin in one org and a Viewer in another.
+model Membership {
+  id             String   @id @default(cuid())
+  userId         String   @map("user_id")
+  organizationId String   @map("organization_id")
+  role           String   @default("viewer")
+  createdAt      DateTime @default(now()) @map("created_at")
+  updatedAt      DateTime @updatedAt @map("updated_at")
+
+  user         User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, organizationId])
+  @@map("memberships")
 }

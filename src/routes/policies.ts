@@ -4,7 +4,7 @@ import { isAddress } from "viem";
 import { policyRegistry } from "../chain/client.js";
 import { serializeTx } from "../chain/txQueue.js";
 import { prisma } from "../db/client.js";
-import { requireRole } from "../auth/apiKeyAuth.js";
+import { requireRole } from "../auth/clerkAuth.js";
 import { getCorrelationId } from "../auth/correlation.js";
 
 const addressField = z.string().refine((v) => isAddress(v), "invalid EVM address");
@@ -22,7 +22,7 @@ const setAllowlistBody = z.object({
   allowed: z.boolean(),
 }).strict();
 
-// Both routes require the admin x-api-key (see auth/apiKeyAuth.ts) and
+// Both routes require the admin role (see auth/clerkAuth.ts) and
 // are rate-limited independently of the server-wide default, since
 // each successful call sends a real transaction and costs real gas.
 const gasSpendingRoute = {

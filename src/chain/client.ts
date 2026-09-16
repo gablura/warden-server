@@ -1,4 +1,4 @@
-import { createPublicClient, defineChain, http } from "viem";
+import { createPublicClient, defineChain, fallback, http, type Transport } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { config } from "../config.js";
 
@@ -25,7 +25,43 @@ export const arc = defineChain({
   },
 });
 
-export const publicClient = createPublicClient({ chain: arc, transport: http(config.ARC_RPC_URL) });
+/// Per-request cap for each endpoint in a fallback chain. Without it, an
+/// endpoint that silently DROPS packets (firewall behavior, not connection
+/// refusal) hangs the connect for minutes and stalls the whole chain —
+/// the fallback only helps if a sick endpoint yields promptly. Generous
+/// enough for getLogs over long ranges; far below the minutes a dropped
+/// connect would otherwise wait.
+const RPC_TIMEOUT_MS = 10_000;
+
+/// Shared transport construction. Every client — the global read client
+/// here and the per-deployment read/write clients in orgContracts.ts —
+/// goes through this so backup-RPC failover (hardening review §5.5,
+/// incident scenario 3) is automatic everywhere instead of a manual
+/// ARC_RPC_URL swap.
+///
+/// Shape: the primary URL first, then ARC_RPC_FALLBACK_URLS in order.
+/// fallback() ranks endpoints by observed health — a primary that flakes
+/// demotes itself and a backup carries traffic until it recovers — and
+/// retryCount re-issues a failed request against the next endpoint within
+/// the same call, so one RPC blip no longer surfaces as a 503 or a lost
+/// watcher poll.
+export function arcTransport(rpcUrl: string): Transport {
+  const urls = [rpcUrl, ...(config.ARC_RPC_FALLBACK_URLS ?? [])].filter(
+    (u, i, all) => all.indexOf(u) === i,
+  );
+  if (urls.length === 1) return http(urls[0]!, { timeout: RPC_TIMEOUT_MS });
+  // Inside a chain, per-endpoint retries stay at 0: rotating to the next
+  // endpoint IS the retry, and re-trying a dead primary 3× (each burning
+  // the full timeout) is exactly the multi-second stall the chain exists
+  // to prevent. The single-endpoint path keeps viem's default retries —
+  // with no backup, in-place retries are the only resilience there is.
+  return fallback(
+    urls.map((u) => http(u, { retryCount: 0, timeout: RPC_TIMEOUT_MS })),
+    { rank: true },
+  );
+}
+
+export const publicClient = createPublicClient({ chain: arc, transport: arcTransport(config.ARC_RPC_URL) });
 
 // Relayer identities (used for audit rows on the relayer signing path).
 // Addresses are derived, never secret.

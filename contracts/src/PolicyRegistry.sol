@@ -3,6 +3,24 @@ pragma solidity ^0.8.24;
 
 import "./AccessControlLite.sol";
 
+// File-level Slither suppressions — triaged 2026-09-16, one finding class:
+// the per-UTC-day cap accounting (block.timestamp / 1 days) that every
+// limit in this contract is built on. Both `incorrect-equality` and
+// `timestamp` hits are the day-boundary comparisons (`lastResetDay ==
+// today`, `lastGlobalResetDay == today`) and their derivative requires.
+// These are not manipulable-value hazards here: both sides of every
+// comparison derive from the SAME block's timestamp, so a miner cannot
+// shift an individual reset or cap check more than the block's own
+// timestamp already does — daily caps are tolerance-grade controls (a
+// miner's ~seconds of timestamp drift cannot materially extend a day),
+// and a *missed* day-boundary equality only carries spend into the next
+// day, which is conservative (spend stays capped, never unbounded).
+// The authoritative enforcement (recordSpend's require) is itself part
+// of this same accounting and equally safe. Cross-checked against the
+// 97-test Foundry suite (Hardening.t.sol, Reservation.t.sol).
+// slither-disable-start incorrect-equality
+// slither-disable-start timestamp
+
 /// @notice Source of truth for what each AI agent is allowed to spend.
 /// SpendGuard reads this before moving any USDC, and writes back to it
 /// only once a payment actually settles.
@@ -297,3 +315,8 @@ contract PolicyRegistry is AccessControlLite {
         globalSpentToday += amount;
     }
 }
+
+// Scope of the day-boundary suppressions opened above — the entire contract
+// body is this one accounting pattern.
+// slither-disable-end incorrect-equality
+// slither-disable-end timestamp

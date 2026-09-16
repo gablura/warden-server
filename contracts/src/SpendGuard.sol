@@ -117,7 +117,12 @@ contract SpendGuard is AccessControlLite, ReentrancyGuard {
             // so no pending row, no audit entry, no requestId leaks out),
             // instead of surfacing later as a reverted, gas-costing approval.
             registry.reserve(agent, requestId, amount);
-            pending[requestId] = PendingRequest(agent, counterparty, amount, false);
+            // Reentrancy-benign: the preceding external call is registry.reserve
+        // on the immutable, admin-set PolicyRegistry (setGuard-gated), and
+        // requestPayment is nonReentrant — no reentrant write to `pending`
+        // is reachable. Slither triage 2026-09-16.
+        // slither-disable-next-line reentrancy-benign
+        pending[requestId] = PendingRequest(agent, counterparty, amount, false);
             auditLog.record(agent, counterparty, amount, "escalated");
             emit PaymentEscalated(requestId, agent, counterparty, amount);
             return requestId;
@@ -183,6 +188,12 @@ contract SpendGuard is AccessControlLite, ReentrancyGuard {
     /// recordSpend() that ran just before it — so a payment is only ever
     /// recorded as spend once the money has actually moved.
     function _settle(address from, address counterparty, uint256 amount) internal {
+        // The "arbitrary from" is the custody model, not a flaw: `from` is
+        // the agent whose policy was just checked (checkPolicy/recordSpend
+        // above) and who granted SpendGuard its allowance up front — the
+        // non-custodial pull described on requestPayment. Slither triage
+        // 2026-09-16.
+        // slither-disable-next-line arbitrary-send-erc20
         require(usdc.transferFrom(from, counterparty, amount), "USDC settlement failed");
     }
 }

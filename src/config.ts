@@ -24,6 +24,23 @@ const schema = z.object({
   PORT: z.coerce.number().default(4000),
   CORS_ORIGIN: z.string().default("http://localhost:3000"),
   ARC_RPC_URL: z.string().url(),
+  // Optional ordered backup RPC endpoints (hardening review §5.5, incident
+  // scenario 3 previously said "switch to a backup RPC endpoint by updating
+  // ARC_RPC_URL and redeploying" — with fallbacks that failover is
+  // automatic). Parsed as a comma-separated list; every entry must be a
+  // valid URL. Leave unset for the single-endpoint behavior.
+  ARC_RPC_FALLBACK_URLS: z
+    .string()
+    .transform((v) => (v.trim() === "" ? [] : v.split(",").map((s) => s.trim()).filter(Boolean)))
+    .refine(
+      (urls) => urls.every((u) => {
+        try { new URL(u); return true; } catch { return false; }
+      }),
+      "every fallback must be a valid URL",
+    )
+    .refine((urls) => new Set(urls).size === urls.length, "fallback URLs must not repeat")
+    .refine((urls) => !urls.includes(process.env.ARC_RPC_URL ?? ""), "fallbacks must not repeat ARC_RPC_URL")
+    .optional(),
   ARC_CHAIN_ID: z.coerce.number(),
   DATABASE_URL: z.string(),
   POLICY_REGISTRY_ADDRESS: address,

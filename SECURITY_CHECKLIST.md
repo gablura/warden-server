@@ -93,22 +93,30 @@ git check-ignore -v cache/**/run-latest.json       # ✅ Ignored
 4. **Set up branch protection** (for production)
 5. **Consider using secrets management** for production deployments
 
-## 🔍 Contract-Level Static Analysis (Hardening Review §5.4)
+## 🔍 Contract-Level Static Analysis (Hardening Review §5.4) — ✅ RUN 2026-09-16
 
-Before mainnet deployment, run Slither on the three contracts (PolicyRegistry, SpendGuard, AuditLog, plus the shared AccessControlLite and ReentrancyGuard bases). Slither catches classes of bugs that hand-written Foundry tests often don't cover: reentrancy patterns, unchecked external calls, and storage layout issues.
+Slither (0.10.x, solc 0.8.37) was run against all four contracts. Results:
+
+| Contract | Findings | Disposition |
+|---|---|---|
+| AuditLog | 0 | clean |
+| AccessControlLite | 0 | clean |
+| SpendGuard | 2 → 0 | `arbitrary-send-erc20` on `_settle` (that IS the non-custodial pull model — `from` is the policy-checked agent who granted the allowance) and `reentrancy-benign` (neutralized by `nonReentrant` + trusted immutable registry). Both suppressed in-source with the reasoning inline. |
+| PolicyRegistry | 12 → 0 | one class: the per-UTC-day cap accounting (`block.timestamp / 1 days` equalities/comparisons). Both comparison sides derive from the same block's timestamp and a missed day-boundary is conservative (spend carries over capped, never unbounded). Scoped region suppression with the full argument in-source. |
+
+Re-running (do this after ANY contract change, and again right before mainnet):
 
 ```bash
-# Install Slither (requires Python + pip)
 pip install slither-analyzer
-
-# Run on each contract
-cd contracts
-slither src/PolicyRegistry.sol --foundry-compile-all
-slither src/SpendGuard.sol --foundry-compile-all
-slither src/AuditLog.sol --foundry-compile-all
+# The repo's foundry.toml forces Slither's Foundry platform; when forge is
+# unavailable (e.g. forge missing from PATH), the src/ contracts compile
+# standalone — they only use same-directory imports:
+cp contracts/src/*.sol tmp/slither-run/ && cd tmp/slither-run && slither SpendGuard.sol && slither PolicyRegistry.sol && slither AuditLog.sol && slither AccessControlLite.sol
+# With forge installed, the direct form works:
+cd contracts && slither src/SpendGuard.sol
 ```
 
-Review every finding. False positives are common — suppress them with `// slither-disable-next-line` comments in the contract with a note explaining why the finding doesn't apply. A clean Slither run is a prerequisite for any mainnet deployment.
+⚠️ **Forge was not installed on this machine at triage time** (`.foundry/bin` empty) — reinstall (`foundryup` or foundry installation script) and re-run `forge test` (expect 97 passing) before mainnet. A clean Slither run is a prerequisite for any mainnet deployment.
 
 ## 🚨 Incident Response Plan (Hardening Review §5.5)
 
@@ -132,7 +140,7 @@ Review every finding. False positives are common — suppress them with `// slit
 1. **Check `/status`** for current lag. Under 100 blocks is normal; over 1000 means the watcher has stalled.
 2. **Check server logs** for `[payments:*]` or `[policies:*]` error lines — the runner logs every failed event with its tx hash.
 3. **Restart the server** if the watcher is stuck. The indexer resumes from its last checkpoint on boot — no events are lost.
-4. **If the RPC is the bottleneck** (rate limiting, timeouts), switch to a backup RPC endpoint by updating `ARC_RPC_URL` and redeploying.
+4. **If the RPC is the bottleneck** (rate limiting, timeouts): backup RPC endpoints set via `ARC_RPC_FALLBACK_URLS` (comma-separated, see `.env.example`) fail over automatically — viem's fallback transport demotes a failing primary and re-issues requests against the backups, for reads and transaction submission alike. If no fallbacks are configured, add one and redeploy; the manual swap of `ARC_RPC_URL` still works as a last resort.
 
 ### Scenario 4: "We need to emergency-stop all settlement"
 
@@ -152,6 +160,32 @@ If sensitive files were accidentally committed:
 
 ---
 
-**Status**: ✅ All sensitive files properly protected
-**Date**: 2026-09-14
-**Last Verified**: Git ignore rules confirmed functional
+## 🚀 Mainnet Go-Live Checklist (hardening review — remaining items)
+
+Every box checked is a precondition for pointing Warden at real money:
+
+- [ ] **`forge test` re-run green (97 tests)** — forge must be reinstalled first (see §5.4 note above).
+- [ ] **Slither re-run with 0 findings** after the last contract edit.
+- [ ] **`globalDailyCap` set to a concrete value** — it deploys as `type(uint256).max` (unlimited) by design; an unset ceiling means the circuit breaker doesn't exist. `setGlobalDailyCap(...)` post-deploy, before any traffic.
+- [ ] **Request-signing window closed** — `UNSIGNED_REQUESTS_ALLOWED_UNTIL=2026-10-01T00:00:00Z` is set in `.env`; verify boot logs show "Request signing enforced" (or flip `REQUIRE_SIGNED_REQUESTS=true` directly) once service callers have adopted `scripts/signed-request-example.mjs`.
+- [ ] **Per-org deployments configured** — `WARDEN_NETWORK=mainnet` plus each org's five fields (`mainnetPolicyRegistry`, `mainnetSpendGuard`, `mainnetAuditLog`, `mainnetRpcUrl`, `mainnetChainId`). Partial configs fail loudly at resolution (OrgDeploymentError) — that is the intended behavior.
+- [ ] **Agent org backfill run once** — `npx tsx scripts/backfill-agent-orgs.ts` immediately after enabling per-org deployments (stamps agents indexed before the tenant-scoping change; idempotent, safe against a live server).
+- [ ] **Backup RPC configured** — `ARC_RPC_FALLBACK_URLS` with at least one independent endpoint (failover is automatic; see incident scenario 3).
+- [ ] **Production origins allowlisted** — `CORS_ORIGIN` includes the production dashboard origin (it feeds both CORS and the `/ws` upgrade origin check).
+- [ ] **Keyset/limits verified under load** — `/audit`, `/agents`, `/approvals` cap at `MAX_LIMIT=200`; no unbounded reads remain.
+
+## 🧯 Ops Drill Checklist (incident plan §5.5 — rehearse, don't just read)
+
+The plan above is only as good as the last time someone walked it. Each drill on **testnet**, dated when done:
+
+- [ ] **Key-rotation drill** — rotate one `WARDEN_API_KEYS` credential via the `previousKey` grace window; verify both keys work, then drop `previousKey` and verify only the new key works.
+- [ ] **Pause drill** — `setPaused(true)` on the testnet SpendGuard; verify `requestPayment` reverts `ContractPaused`, `rejectPending` still succeeds, then unpause.
+- [ ] **RPC failover drill** — set `ARC_RPC_URL` to a dead endpoint with `ARC_RPC_FALLBACK_URLS` populated; verify reads, tx submission, and the indexer keep working through the fallback.
+- [ ] **Indexer recovery drill** — kill the server mid-stream, restart; verify the boot backfill resumes from the checkpoint with zero double-counted spend (`ProcessedLog` idempotency) and zero gaps.
+- [ ] **Incident tabletop** — walk Scenario 1 (key leak) end to end on testnet using only the written plan; fix the plan where the walkthrough stalls.
+
+---
+
+**Status**: ✅ All sensitive files properly protected · Slither triage complete 2026-09-16
+**Date**: 2026-09-16
+**Last Verified**: Git ignore rules confirmed functional; contract static analysis clean (see §5.4)

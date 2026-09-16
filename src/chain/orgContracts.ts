@@ -1,8 +1,9 @@
-import { createPublicClient, createWalletClient, defineChain, http } from "viem";
+import { createPublicClient, createWalletClient, defineChain } from "viem";
 import type { Account, Chain, PublicClient, Transport, WalletClient } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { isAddress } from "viem";
 import { config } from "../config.js";
+import { arcTransport } from "./client.js";
 import { prisma } from "../db/client.js";
 
 // ── Per-org contract addressing (§7) ─────────────────────────────────
@@ -128,7 +129,9 @@ function chainClients(rpcUrl: string, chainId: number): ChainClients {
     },
   });
 
-  const transport = http(rpcUrl);
+  // arcTransport layers the ARC_RPC_FALLBACK_URLS failover onto every read
+  // and write this deployment makes (see chain/client.ts).
+  const transport = arcTransport(rpcUrl);
   // The same server-held keys operate every deployment: each org's contracts
   // are deployed with ADMIN_PRIVATE_KEY as admin (see contracts/script).
   const adminAccount = privateKeyToAccount(config.ADMIN_PRIVATE_KEY as `0x${string}`);

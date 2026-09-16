@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import { prisma } from "../db/client.js";
 import { config } from "../config.js";
 
 /// Optional HMAC request signing — replay protection for the api-key auth
@@ -13,8 +14,8 @@ import { config } from "../config.js";
 ///   x-timestamp:  current unix time in ms, as a string
 ///   x-nonce:      at least 16 chars of randomness, unique per request
 ///   x-signature:  hex HMAC-SHA256(apiKey, `${timestamp}.${nonce}.${bodyHash}`)
-///                 where bodyHash = sha256 hex of the exact request body
-///                 (JSON.stringify of the parsed body for JSON requests;
+///                 where bodyHash = sha256 hex of the exact raw request bytes
+///                 (captured by the raw-body content-type parser in server.ts;
 ///                 sha256 of "" when there is no body, e.g. GET)
 ///
 /// Enforcement is configuration-driven — no code change is needed to close
@@ -27,22 +28,19 @@ import { config } from "../config.js";
 /// for a reference signer.
 
 const SIGNATURE_MAX_AGE_MS = 5 * 60 * 1000;
-const NONCE_TTL_MS = SIGNATURE_MAX_AGE_MS;
 const MIN_NONCE_LENGTH = 16;
 
-// Bounded in-memory replay cache. A nonce is remembered for slightly longer
-// than the freshness window, so a captured request can never be replayed
-// within the window it would still validate. Size is naturally bounded by
-// (requests per 5 min) — for the volume this server sees, a Map with
-// opportunistic sweeping is the right tool, not a dependency.
-const seenNonces = new Map<string, number>();
+// Bounded replay-protection store. A nonce is remembered in the
+// `signature_nonces` table for the whole freshness window, so a captured
+// request can never be replayed while it would still validate. The store is
+// the database (not per-process memory) because memory loses the window on
+// every restart and is not shared across replicas — either gap would let a
+// captured request be replayed. Rows are swept opportunistically (see
+// sweepExpiredNonces), so the table stays roughly (requests per 5 min) big.
 
-function sweepNonces(now: number) {
-  if (seenNonces.size < 10_000) return;
-  for (const [nonce, expiry] of seenNonces) {
-    if (expiry <= now) seenNonces.delete(nonce);
-  }
-}
+/// How often (per signed request) the expired-nonce sweep runs. Housekeeping
+/// only — a skipped sweep leaves dead rows for the next one to collect.
+const NONCE_SWEEP_PROBABILITY = 1 / 16;
 
 function sha256Hex(input: string) {
   return crypto.createHash("sha256").update(input).digest("hex");
@@ -67,12 +65,36 @@ export function unsignedRequestsAllowed(): boolean {
   return Date.now() < Date.parse(config.UNSIGNED_REQUESTS_ALLOWED_UNTIL);
 }
 
-export function verifyRequestSignature(
+/// Records the nonce as consumed. Returns false when the nonce is already in
+/// the table (a replay), true when this request owns it. The unique
+/// constraint on `nonce` makes this race-safe across replicas: exactly one
+/// concurrent request can claim a given nonce.
+async function claimNonce(nonce: string, expiresAt: Date): Promise<boolean> {
+  try {
+    await prisma.signatureNonce.create({ data: { nonce, expiresAt } });
+    return true;
+  } catch (err) {
+    if ((err as { code?: string }).code === "P2002") return false;
+    throw err;
+  }
+}
+
+/// Occasionally deletes rows whose freshness window has passed — they can
+/// never be matched by a live request again. Fire-and-forget: sweeping is
+/// housekeeping, and a failed sweep costs nothing but a retry next request.
+function sweepExpiredNonces() {
+  if (Math.random() >= NONCE_SWEEP_PROBABILITY) return;
+  prisma.signatureNonce
+    .deleteMany({ where: { expiresAt: { lt: new Date() } } })
+    .catch(() => {});
+}
+
+export async function verifyRequestSignature(
   apiKey: string,
   headers: { timestamp?: string | string[]; nonce?: string | string[]; signature?: string | string[] },
-  body: unknown,
+  rawBody: string | undefined,
   options?: { allowUnsigned?: boolean },
-): SignatureFailure {
+): Promise<SignatureFailure> {
   const timestamp = typeof headers.timestamp === "string" ? headers.timestamp : undefined;
   const nonce = typeof headers.nonce === "string" ? headers.nonce : undefined;
   const signature = typeof headers.signature === "string" ? headers.signature : undefined;
@@ -93,16 +115,11 @@ export function verifyRequestSignature(
   if (Math.abs(now - ts) > SIGNATURE_MAX_AGE_MS) return { ok: false, reason: "stale_timestamp" };
   if (nonce.length < MIN_NONCE_LENGTH) return { ok: false, reason: "bad_signature_format" };
 
-  sweepNonces(now);
-  const nonceExpiry = seenNonces.get(nonce);
-  if (nonceExpiry !== undefined && nonceExpiry > now) return { ok: false, reason: "replayed_nonce" };
-
-  // Key order matters: the client must sign the exact serialized body it
-  // sends (JSON.stringify of their object), because the server hashes
-  // JSON.stringify of what it parsed — identical when the client does the
-  // same, which is the documented contract.
-  const bodyString = body === undefined || body === null ? "" : JSON.stringify(body);
-  const expected = expectedSignature(apiKey, timestamp, nonce, bodyString);
+  // The signature covers the EXACT bytes on the wire (captured raw by the
+  // content-type parser in server.ts), so any serialization difference
+  // between client and server — key order, whitespace — is caught, and a
+  // well-behaved client that signs the string it sends always verifies.
+  const expected = expectedSignature(apiKey, timestamp, nonce, rawBody ?? "");
   const a = Buffer.from(signature, "hex");
   const b = Buffer.from(expected, "hex");
   // A malformed signature has the wrong byte length; comparing fixed-length
@@ -114,8 +131,21 @@ export function verifyRequestSignature(
 
   if (!valid) return { ok: false, reason: "invalid_signature" };
 
-  // Only burn the nonce on success — otherwise garbage signatures could
-  // poison a legitimately generated nonce.
-  seenNonces.set(nonce, now + NONCE_TTL_MS);
+  // Burn the nonce only after the signature verifies — garbage signatures
+  // must not consume a legitimately generated nonce. Claim failure here
+  // means the nonce is already in the store: a replay.
+  sweepExpiredNonces();
+  const accepted = await claimNonce(nonce, new Date(now + SIGNATURE_MAX_AGE_MS));
+  if (!accepted) return { ok: false, reason: "replayed_nonce" };
+
   return { ok: true };
+}
+
+// Fastify request augmentation — server.ts's raw-body content-type parser
+// stores the untouched request bytes here so signature verification hashes
+// exactly what the client sent.
+declare module "fastify" {
+  interface FastifyRequest {
+    rawBody?: string;
+  }
 }

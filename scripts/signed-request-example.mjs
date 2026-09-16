@@ -20,9 +20,9 @@
 /// Server-side rules this must satisfy (see src/auth/requestSignature.ts):
 ///   - timestamps more than 5 minutes from the server's clock are rejected
 ///   - a nonce cannot be reused while its timestamp would still validate
-///   - the signature covers the exact serialized body the server will hash,
-///     which is JSON.stringify of the parsed JSON — so sign the same string
-///     you send (do NOT let an HTTP library re-serialize a passed object)
+///   - the signature covers the EXACT bytes on the wire (the server hashes
+///     its raw-body capture) — sign the same string you send and do NOT let
+///     an HTTP library re-serialize a passed object
 
 import crypto from "node:crypto";
 
@@ -44,9 +44,10 @@ export async function signedFetch(method, path, apiKey, body) {
   // 32 hex chars of randomness — comfortably above the 16-char minimum.
   const nonce = crypto.randomBytes(16).toString("hex");
 
-  // The signed string must be the exact bytes on the wire. JSON.stringify of
-  // the body here, and JSON.stringify of the parsed body on the server, are
-  // identical — the documented contract. For no body, sign "".
+  // The signed string must be the exact bytes on the wire: what is signed
+  // here is sent verbatim as the body, and the server hashes its raw-body
+  // capture of those same bytes — key order and whitespace are preserved
+  // end to end. For no body, sign "".
   const bodyString = body === undefined ? "" : JSON.stringify(body);
   const bodyHash = sha256Hex(bodyString);
   const signature = crypto.createHmac("sha256", apiKey).update(`${timestamp}.${nonce}.${bodyHash}`).digest("hex");

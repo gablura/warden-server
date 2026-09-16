@@ -6,7 +6,8 @@ import { ChainUnavailableError } from "./errors.js";
 import { serializeTx } from "./txQueue.js";
 import { isCircleConfigured } from "../auth/wallet.js";
 import { CircleError, executeContractAndWait } from "./circleExecution.js";
-import type { Deployment } from "./orgContracts.js";
+import { deploymentKey, type Deployment } from "./orgContracts.js";
+import { recordTxFailure } from "./txAlert.js";
 
 // ── Transaction signing router (§2 + §6) ─────────────────────────────
 //
@@ -80,6 +81,9 @@ export async function submitAsAdmin(
     return { txHash, signer: adminAddress, via: "relayer" };
   } catch (err) {
     if (err instanceof ChainUnavailableError) throw err;
+    // A submission failure — as opposed to a route/validation failure — is
+    // exactly what monitoring should surface (hardening review §5.2).
+    recordTxFailure({ functionName, deployment: deploymentKey(deployment) });
     throw new ChainUnavailableError(`admin transaction ${functionName} failed`, { cause: err });
   }
 }
@@ -141,6 +145,10 @@ export async function submitAsApprover(args: {
       });
     } catch (err) {
       if (err instanceof GrantMissingError || err instanceof ChainUnavailableError) throw err;
+      // The grant pre-check passed and a submission was attempted: a
+      // failure here is a real submission failure — record it for the
+      // burst monitor before wrapping (see chain/txAlert.ts).
+      recordTxFailure({ functionName: args.functionName, deployment: deploymentKey(deployment) });
       if (err instanceof CircleError) {
         throw new ChainUnavailableError(`approval signing via Circle failed: ${err.message}`, { cause: err });
       }
@@ -164,6 +172,7 @@ export async function submitAsApprover(args: {
     return { txHash, signer: approverAddress, via: "relayer" };
   } catch (err) {
     if (err instanceof ChainUnavailableError) throw err;
+    recordTxFailure({ functionName: args.functionName, deployment: deploymentKey(deployment) });
     throw new ChainUnavailableError(`approval transaction ${args.functionName} failed`, { cause: err });
   }
 }

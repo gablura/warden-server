@@ -248,3 +248,27 @@ model Invitation {
   @@index([email])
   @@map("invitations")
 }
+
+// ---------------------------------------------------------------------------
+// API-key request signing (src/auth/requestSignature.ts)
+// ---------------------------------------------------------------------------
+
+/// Replay protection for HMAC-signed API requests: one row per accepted
+/// nonce, unique on the nonce itself so concurrent replicas race safely —
+/// exactly one insert wins and the duplicate is rejected as a replay.
+/// Rows expire with the signature freshness window and are swept
+/// opportunistically; the (indexed) table stays roughly
+/// (requests per 5 minutes) in size.
+///
+/// This is deliberately in the database, not per-process memory: memory
+/// loses the replay window on every restart and is not shared across
+/// replicas, so a captured request could be replayed against another
+/// replica within the window it would still validate.
+model SignatureNonce {
+  nonce     String   @id
+  expiresAt DateTime @map("expires_at")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@index([expiresAt])
+  @@map("signature_nonces")
+}

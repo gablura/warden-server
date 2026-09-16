@@ -12,8 +12,15 @@ import { prisma } from "../db/client.js";
 ///    and it is skipped — so an overlapping backfill or a replayed block
 ///    range can never double-increment spentToday or duplicate audit rows.
 ///    Claim-first is deliberate over side-effect-first: for spend totals,
-///    a lost increment (logged loudly) is recoverable; a doubled one is
-///    silent and wrong.
+///    a doubled one is silent and wrong. A FAILED side effect RELEASES the
+///    claim (see processBatch), so the event is retried by the next
+///    backfill instead of being skipped forever — without that release the
+///    marker would say "applied" while its effects never ran, silently
+///    losing the event permanently. Residual window: a process crash
+///    between claim and side effect leaves the marker in place (no single
+///    transaction can span DB writes, RPC reads, and WS broadcasts), so
+///    such an event is skipped on the next boot — a rare crash-window gap,
+///    accepted over the certain double-processing bug it prevents.
 /// 2. **Persisted checkpoint.** After each batch, the watcher's
 ///    IndexerCheckpoint advances to the highest block whose events all
 ///    processed cleanly — a failed event holds the checkpoint back, so the
@@ -154,11 +161,21 @@ async function processBatch(cfg: WatcherConfig, logs: ProcessableLog[]) {
     try {
       const claimed = await claimLog(cfg.name, log);
       if (!claimed) continue; // Already applied — the whole point of the marker.
-      await cfg.onLog(log);
+      await processLogWithRetry(cfg, log);
       if (!failed) checkpointBlock = log.blockNumber;
     } catch (err) {
       failed = true;
       console.error(`[${cfg.name}] error processing event in tx ${log.transactionHash}:`, err);
+      // RELEASE the claim. Claim-first is safe against double-processing but
+      // dangerous against *failed* processing: without this, the marker
+      // would say "applied" while its side effects never ran, and every
+      // future backfill would skip the event forever — a silent, permanent
+      // loss. Releasing it means the checkpoint (held back below) makes the
+      // next boot's backfill — or this batch's chunk-level retry — replay
+      // the event cleanly. The claim's uniqueness is (txHash, logIndex) and
+      // the two watchers watch different contracts, so a release can never
+      // drop another watcher's claim.
+      await releaseClaim(log);
     }
   }
 
@@ -168,6 +185,43 @@ async function processBatch(cfg: WatcherConfig, logs: ProcessableLog[]) {
       create: { watcher: cfg.name, lastBlock: checkpointBlock },
       update: { lastBlock: checkpointBlock },
     });
+  }
+}
+
+/// Retries a single log's side effects before giving up: the common failure
+/// is a transient DB hiccup, which a short backoff absorbs without ever
+/// surfacing. Permanent failures propagate to processBatch, which releases
+/// the claim so the event is retried on the next backfill instead of being
+/// silently skipped.
+const LOG_RETRY_ATTEMPTS = 3;
+const LOG_RETRY_DELAY_MS = 2_000;
+
+async function processLogWithRetry(cfg: WatcherConfig, log: ProcessableLog): Promise<void> {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      await cfg.onLog(log);
+      return;
+    } catch (err) {
+      if (attempt >= LOG_RETRY_ATTEMPTS) throw err;
+      console.error(`[${cfg.name}] attempt ${attempt}/${LOG_RETRY_ATTEMPTS} failed for tx ${log.transactionHash}, retrying:`, err);
+      await delay(LOG_RETRY_DELAY_MS * attempt);
+    }
+  }
+}
+
+/// Best-effort removal of this log's claim marker. If even the release
+/// fails, the event is skipped by future runs — the error is logged loudly
+/// so an operator can clear the marker manually.
+async function releaseClaim(log: ProcessableLog): Promise<void> {
+  try {
+    await prisma.processedLog.deleteMany({
+      where: { txHash: log.transactionHash, logIndex: log.logIndex },
+    });
+  } catch (err) {
+    console.error(
+      `[releaseClaim] could not release the claim for ${log.transactionHash}:${log.logIndex} — this event will be skipped until the marker is cleared manually:`,
+      err,
+    );
   }
 }
 

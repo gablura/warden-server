@@ -128,9 +128,10 @@ export function broadcastEvent(event: unknown, deployment: Deployment): void {
   }
 }
 
-/// System-level events (auth-failure alerts, boot notices). These carry no
-/// tenant data (role name, reason, IP), so they reach wildcard subscribers
-/// in every scope — every operator watches their own console.
+/// System-level events (auth-failure alerts, tx-failure alerts, boot
+/// notices). These carry no tenant data and no infrastructure identifiers
+/// (role name, reason — but never a source IP), so they reach wildcard
+/// subscribers in every scope — every operator watches their own console.
 export function broadcastSystem(event: unknown): void {
   const payload = JSON.stringify(event);
   for (const [, managed] of clients) {

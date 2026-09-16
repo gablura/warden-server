@@ -1,9 +1,11 @@
 import Fastify from "fastify";
+import type { FastifyRequest } from "fastify";
 import cors from "@fastify/cors";
 import websocket from "@fastify/websocket";
 import rateLimit from "@fastify/rate-limit";
 import { config } from "./config.js";
 import { ChainUnavailableError } from "./chain/errors.js";
+import { setTxAlertLogger } from "./chain/txAlert.js";
 import { agentRoutes } from "./routes/agents.js";
 import { policyRoutes } from "./routes/policies.js";
 import { approvalRoutes } from "./routes/approvals.js";
@@ -14,7 +16,7 @@ import { clerkWebhookRoutes } from "./routes/webhooks.js";
 import { registerClient, registerAnonymousClient } from "./ws/broadcast.js";
 import { deploymentKey, resolveDeployment } from "./chain/orgContracts.js";
 import { setAuthAlertLogger } from "./auth/failureAlert.js";
-import { acquireIndexerLeadership } from "./indexer/leader.js";
+import { runIndexerLeadership } from "./indexer/leader.js";
 import { watchPaymentEvents } from "./indexer/watchPaymentEvents.js";
 import { watchPolicyEvents } from "./indexer/watchPolicyEvents.js";
 
@@ -29,6 +31,40 @@ function errorFields(err: unknown) {
 }
 
 const app = Fastify({ logger: true });
+
+// ── Raw-body capture (for HMAC verification of the exact wire bytes) ────
+//
+// Request signatures cover the body AS SENT (see auth/requestSignature.ts),
+// so the server must hash the untouched request bytes, not a re-serialization
+// of the parsed object — any client key-order or whitespace difference would
+// otherwise fail verification. The content-type parser below captures the
+// raw string alongside parsing, storing it on req.rawBody (declared in
+// requestSignature.ts).
+//
+// Fastify has no global JSON.parse hook for body parsing — the documented
+// way to see the raw body is a content-type parser. Registering one for
+// application/json preserves Fastify's default parsing behavior.
+app.addContentTypeParser(
+  "application/json",
+  { parseAs: "string" },
+  (req, body, done) => {
+    // The parser receives the raw string; store it and hand Fastify the
+    // parsed object exactly as its default parser would.
+    (req as FastifyRequest).rawBody = body as string;
+    try {
+      done(null, JSON.parse(body as string));
+    } catch (err) {
+      (done as (e: unknown, v?: unknown) => void)(err);
+      return;
+    }
+  },
+);
+
+// ── Transaction-failure alerting (hardening review §5.2) ────────────────
+// Failed tx submissions burst-alert through the app's pino logger (see
+// chain/txAlert.ts) — the same one-log-line-per-burst + WS broadcast shape
+// as auth-failure alerting.
+setTxAlertLogger((obj, msg) => app.log.error(obj, msg));
 
 // Surface the request-signing enforcement posture at boot. A migration
 // window that closes silently is how "temporary" exceptions become
@@ -132,22 +168,21 @@ app.get("/health", async () => ({ ok: true }));
 // watcher instance — with more than one replica, every other replica skips
 // starting its watchers instead of processing every event multiple times
 // (which would multiply spend totals and duplicate audit rows).
-app.log.info("Starting chain event indexers...");
-try {
-  const isLeader = await acquireIndexerLeadership();
-  if (isLeader) {
-    // Each watcher backfills from its persisted checkpoint before going
-    // live, so a restart resumes instead of skipping events.
-    await Promise.all([watchPaymentEvents(), watchPolicyEvents()]);
-    app.log.info("Chain event indexers started successfully (this instance holds the indexer lock)");
-  } else {
-    app.log.warn("Another instance holds the indexer lock — running API-only, no watchers started");
-  }
-} catch (err) {
-  app.log.error({ err }, "Failed to start chain event indexers");
-  // Continue running the server even if indexers fail - the API will still work
-  // but won't have live chain updates until the indexers are fixed
-}
+//
+// Election runs through runIndexerLeadership, which RETRIES every 30s until
+// it acquires the lock: a boot-time-only check would mean a crashed leader
+// is never replaced and indexing stops silently until someone restarts a
+// replica. Duplicate-watcher safety and lock-loss behavior are documented in
+// indexer/leader.ts.
+app.log.info("Starting chain event indexer leadership loop...");
+runIndexerLeadership(async () => {
+  // Each watcher backfills from its persisted checkpoint before going
+  // live, so a restart resumes instead of skipping events.
+  await Promise.all([watchPaymentEvents(), watchPolicyEvents()]);
+  app.log.info("Chain event indexers started successfully (this instance holds the indexer lock)");
+}, app.log).catch((err) => {
+  app.log.error({ err }, "Indexer leadership loop failed unexpectedly");
+});
 
 app.listen({ port: config.PORT, host: "0.0.0.0" }).catch((err) => {
   app.log.error({ err }, "Failed to start server");

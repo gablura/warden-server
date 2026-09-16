@@ -1,0 +1,6 @@
+# Prisma migration checksums are content-hashed: editor or git line-ending
+# conversion makes an applied migration look "modified", which blocks
+# `prisma migrate dev` with a destructive-reset prompt. Normalize to LF
+# everywhere so the bytes Prisma hashed never change.
+*.sql text eol=lf
+*.prisma text eol=lf

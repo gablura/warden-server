@@ -134,21 +134,27 @@ function signatureRejection(req: FastifyRequest, reply: FastifyReply, role: stri
 /// Shared api-key signature verification for requireRole and optionalAuth.
 /// Returns true when the request may continue; false after a 401 reply was
 /// already sent. No key header at all → true (nothing to verify).
-function checkApiKeySignature(
+///
+/// Async: nonce consumption is a database insert (see requestSignature.ts) —
+/// the replay store is shared across replicas, so verification awaits it.
+async function checkApiKeySignature(
   req: FastifyRequest,
   reply: FastifyReply,
   role: string,
-): boolean {
+): Promise<boolean> {
   const apiKey = req.headers["x-api-key"] ?? req.headers.authorization?.slice(7);
   if (typeof apiKey !== "string") return true;
-  const result = verifyRequestSignature(
+  const result = await verifyRequestSignature(
     apiKey,
     {
       timestamp: req.headers["x-timestamp"],
       nonce: req.headers["x-nonce"],
       signature: req.headers["x-signature"],
     },
-    req.body,
+    // The exact bytes on the wire, captured by the raw-body parser in
+    // server.ts. Hashing a re-serialization of the parsed body would break
+    // on any client key-order or whitespace difference.
+    req.rawBody,
     { allowUnsigned: unsignedRequestsAllowed() },
   );
   if (result.ok) return true;
@@ -442,7 +448,7 @@ export function requireRole(role: "admin" | "approver" | "viewer") {
       // (see requestSignature.ts); once REQUIRE_SIGNED_REQUESTS=true or the
       // deadline passes, unsigned api-key requests are rejected with
       // `unsigned_request`.
-      if (!checkApiKeySignature(req, reply, role)) return;
+      if (!(await checkApiKeySignature(req, reply, role))) return;
       return;
     }
 
@@ -497,7 +503,7 @@ export function optionalAuth() {
 
     // api_key
     req.operator = auth.operator;
-    if (!checkApiKeySignature(req, reply, "api_key")) return;
+    if (!(await checkApiKeySignature(req, reply, "api_key"))) return;
     return;
   };
 }

@@ -33,8 +33,12 @@ export async function clerkWebhookRoutes(app: FastifyInstance) {
       return reply.code(400).send({ error: "missing_headers", message: "Missing svix headers" });
     }
 
-    // Get raw body for signature verification
-    const body = JSON.stringify(req.body);
+    // Get raw body for signature verification. The raw-body content-type
+    // parser in server.ts captures the exact bytes Clerk sent — hashing a
+    // re-serialization of the parsed object would break on any whitespace
+    // difference. The fallback keeps verification working if the parser is
+    // ever removed.
+    const body = req.rawBody ?? JSON.stringify(req.body);
 
     const wh = new Webhook(config.CLERK_WEBHOOK_SECRET);
     let event: ClerkWebhookEvent;

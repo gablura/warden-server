@@ -1,5 +1,5 @@
 import { prisma } from "../db/client.js";
-import { broadcast } from "../ws/broadcast.js";
+import { broadcastEvent } from "../ws/broadcast.js";
 import { startWatcher, type ProcessableLog } from "./runner.js";
 import { spendGuardAbi } from "../chain/abis/spendGuard.js";
 import { deploymentKey, listServedDeployments, type Deployment } from "../chain/orgContracts.js";
@@ -52,7 +52,7 @@ export async function watchPaymentEventsFor(deployment: Deployment): Promise<voi
             data: { resolved: true },
           });
         }
-        broadcast({ type: "payment_approved", agent, counterparty, amount: amt.toString() });
+        broadcastEvent({ type: "payment_approved", agent, counterparty, amount: amt.toString() }, deployment);
       },
     },
     {
@@ -67,7 +67,7 @@ export async function watchPaymentEventsFor(deployment: Deployment): Promise<voi
         await prisma.event.create({
           data: { agent: agent!, counterparty: counterparty!, amount: amt, decision: `blocked: ${reason}`, txHash: transactionHash },
         });
-        broadcast({ type: "payment_blocked", agent, counterparty, amount: amt.toString(), reason });
+        broadcastEvent({ type: "payment_blocked", agent, counterparty, amount: amt.toString(), reason }, deployment);
       },
     },
     {
@@ -96,7 +96,7 @@ export async function watchPaymentEventsFor(deployment: Deployment): Promise<voi
           },
           update: {},
         });
-        broadcast({ type: "payment_escalated", requestId: requestId?.toString(), agent, counterparty, amount: amt.toString() });
+        broadcastEvent({ type: "payment_escalated", requestId: requestId?.toString(), agent, counterparty, amount: amt.toString() }, deployment);
       },
     },
     {
@@ -115,7 +115,7 @@ export async function watchPaymentEventsFor(deployment: Deployment): Promise<voi
           where: { deploymentKey: key, requestId: requestId! },
           data: { resolved: true },
         });
-        broadcast({ type: "approval_resolved", requestId: requestId?.toString(), decision: "approved", approver, agent: row?.agent });
+        broadcastEvent({ type: "approval_resolved", requestId: requestId?.toString(), decision: "approved", approver, agent: row?.agent }, deployment);
       },
     },
     {
@@ -131,7 +131,7 @@ export async function watchPaymentEventsFor(deployment: Deployment): Promise<voi
           where: { deploymentKey: key, requestId: requestId! },
           data: { resolved: true },
         });
-        broadcast({ type: "approval_resolved", requestId: requestId?.toString(), decision: "rejected", approver, agent: row?.agent });
+        broadcastEvent({ type: "approval_resolved", requestId: requestId?.toString(), decision: "rejected", approver, agent: row?.agent }, deployment);
       },
     },
   ];

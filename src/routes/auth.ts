@@ -19,6 +19,7 @@ import {
 } from "../chain/approverSync.js";
 import { resolveDeployment } from "../chain/orgContracts.js";
 import { createScopedToken } from "../auth/jwt.js";
+import { issueWsTicket } from "../ws/ticket.js";
 import { getCorrelationId } from "../auth/correlation.js";
 import { config } from "../config.js";
 
@@ -217,6 +218,24 @@ export async function authRoutes(app: FastifyInstance) {
       orgId: membership.organizationId,
       role: membership.role,
     });
+  });
+
+  // ── WebSocket feed ticket ──────────────────────────────────────────
+  //
+  // The /ws upgrade is not covered by header-based auth (browsers cannot
+  // set custom headers on a WebSocket), so the client first exchanges its
+  // authenticated REST session for this short-lived ticket and appends it
+  // to the upgrade URL: /ws?ticket=... The connection's feed is scoped to
+  // the operator's deployment for life (see ws/ticket.ts, ws/broadcast.ts).
+  // Any role may hold the feed — viewing is not a privileged action — so
+  // the gate matches /auth/token's.
+  app.post("/auth/ws-ticket", { preHandler: requireRole("viewer") }, async (req, reply) => {
+    const operator = req.operator!;
+    // The ticket's orgId is the operator's REST-scoping org (scoped tokens
+    // and Clerk+?orgId both land here), so the WS feed mirrors exactly what
+    // this identity sees over REST — same resolveDeployment, same scoping.
+    const { ticket, expiresAt } = issueWsTicket({ operatorId: operator.id, orgId: operator.orgId ?? null });
+    return reply.send({ ticket, expiresAt: expiresAt.toISOString() });
   });
 
   // ── Link / unlink own external wallet ──────────────────────────────

@@ -11,7 +11,8 @@ import { auditRoutes } from "./routes/audit.js";
 import { statusRoutes } from "./routes/status.js";
 import { authRoutes } from "./routes/auth.js";
 import { clerkWebhookRoutes } from "./routes/webhooks.js";
-import { registerClient } from "./ws/broadcast.js";
+import { registerClient, registerAnonymousClient } from "./ws/broadcast.js";
+import { deploymentKey, resolveDeployment } from "./chain/orgContracts.js";
 import { setAuthAlertLogger } from "./auth/failureAlert.js";
 import { acquireIndexerLeadership } from "./indexer/leader.js";
 import { watchPaymentEvents } from "./indexer/watchPaymentEvents.js";
@@ -81,6 +82,14 @@ app.setErrorHandler((err, req, reply) => {
 
 // Dashboard clients connect here for live pushes (new payments, resolved
 // approvals) instead of polling the REST routes.
+//
+// Identity: on mainnet the upgrade requires a short-lived ticket from
+// POST /auth/ws-ticket, and the connection's feed is scoped to the ticket's
+// org deployment for life — a wildcard subscriber can only ever see their
+// own org's deployment (hardening review §1, multi-tenant /ws). Testnet
+// keeps the anonymous global feed: one shared playground, no orgs to
+// isolate. The origin check below remains a separate, defense-in-depth
+// boundary in both modes.
 app.register(async (scope) => {
   scope.get("/ws", { websocket: true }, (socket, req) => {
     const origin = req.headers.origin;
@@ -89,7 +98,23 @@ app.register(async (scope) => {
       socket.close(1008, "origin not allowed");
       return;
     }
-    registerClient(socket);
+
+    const ticket = (req.query as { ticket?: string }).ticket;
+    if (config.WARDEN_NETWORK === "mainnet") {
+      // Registration is async (scope resolution hits the DB) but the handler
+      // has returned, so errors must be handled here: an unresolved scope
+      // (misconfigured org, DB failure) closes the socket instead of leaving
+      // it dangling — and must never surface as an unhandled rejection.
+      registerClient(socket, ticket, async (orgId) => {
+        const deployment = await resolveDeployment(orgId);
+        return deploymentKey(deployment);
+      }).catch((err) => {
+        scope.log.error({ err, ip: req.ip }, "websocket scope resolution failed");
+        socket.close(1011, "scope resolution failed");
+      });
+    } else {
+      registerAnonymousClient(socket);
+    }
   });
 });
 

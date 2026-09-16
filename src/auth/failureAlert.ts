@@ -1,4 +1,4 @@
-import { broadcast } from "../ws/broadcast.js";
+import { broadcastSystem } from "../ws/broadcast.js";
 
 /// Auth-failure burst detection. The hardening review's point: a burst of
 /// 401s on the gas-spending routes is exactly the thing that should page
@@ -49,5 +49,5 @@ export function setAuthAlertLogger(log: (obj: object, msg: string) => void) {
 
 function alertAuthBurst(alert: { ip: string; count: number; role: string; lastReason: string }) {
   logFn?.(alert, "auth_failure_burst — possible credential stuffing or leaked key");
-  broadcast({ type: "auth_alert", ...alert, at: new Date().toISOString() });
+  broadcastSystem({ type: "auth_alert", ...alert, at: new Date().toISOString() });
 }

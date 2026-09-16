@@ -6,7 +6,7 @@ import { readAgentPolicies } from "../chain/policyState.js";
 import { deploymentKey, resolveDeployment, resolveDeploymentForAgent, type Deployment } from "../chain/orgContracts.js";
 import { paymentCheckpointName } from "../indexer/watchPaymentEvents.js";
 import { GrantMissingError, submitAsApprover, type SigningResult } from "../chain/signing.js";
-import { broadcast } from "../ws/broadcast.js";
+import { broadcastEvent } from "../ws/broadcast.js";
 import { requireRole } from "../auth/clerkAuth.js";
 import { productionGate } from "../auth/productionGate.js";
 import { limitQuerySchema, paginatedQuery } from "../db/pagination.js";
@@ -258,12 +258,10 @@ export async function approvalRoutes(app: FastifyInstance) {
     const requestId = parseRequestId(req.params.id);
     if (requestId === null) {
       return reply.code(400).send({ error: "invalid_request", message: "approval id must be a non-negative integer" });
-    }
-
-    try {
-      const { signing, agent } = await resolveRequest(requestId, req.operator, req.operator.maxApproval, "approvePending");
+    }      try {
+      const { signing, agent, deployment } = await resolveRequest(requestId, req.operator, req.operator.maxApproval, "approvePending");
       await recordOperatorAction(req.operator, "approve", requestId.toString(), signing.txHash, signing);
-      broadcast({ type: "approval_resolved", requestId: requestId.toString(), decision: "approved", txHash: signing.txHash, by: req.operator.id, agent });
+      broadcastEvent({ type: "approval_resolved", requestId: requestId.toString(), decision: "approved", txHash: signing.txHash, by: req.operator.id, agent }, deployment);
       return reply.send({ txHash: signing.txHash, signer: signing.signer, via: signing.via, correlationId: req.correlationId });
     } catch (err) {
       if (err instanceof AlreadyResolvedError) {
@@ -290,9 +288,9 @@ export async function approvalRoutes(app: FastifyInstance) {
     }
 
     try {
-      const { signing, agent } = await resolveRequest(requestId, req.operator, req.operator.maxApproval, "rejectPending");
+      const { signing, agent, deployment } = await resolveRequest(requestId, req.operator, req.operator.maxApproval, "rejectPending");
       await recordOperatorAction(req.operator, "reject", requestId.toString(), signing.txHash, signing);
-      broadcast({ type: "approval_resolved", requestId: requestId.toString(), decision: "rejected", txHash: signing.txHash, by: req.operator.id, agent });
+      broadcastEvent({ type: "approval_resolved", requestId: requestId.toString(), decision: "rejected", txHash: signing.txHash, by: req.operator.id, agent }, deployment);
       return reply.send({ txHash: signing.txHash, signer: signing.signer, via: signing.via, correlationId: req.correlationId });
     } catch (err) {
       if (err instanceof AlreadyResolvedError) {

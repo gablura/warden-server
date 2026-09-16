@@ -1,5 +1,5 @@
 import { prisma } from "../db/client.js";
-import { broadcast } from "../ws/broadcast.js";
+import { broadcastEvent } from "../ws/broadcast.js";
 import { startWatcher, type ProcessableLog } from "./runner.js";
 import { policyRegistryAbi } from "../chain/abis/policyRegistry.js";
 import { deploymentKey, listServedDeployments, type Deployment } from "../chain/orgContracts.js";
@@ -45,13 +45,16 @@ export async function watchPolicyEventsFor(deployment: Deployment): Promise<void
           },
         });
 
-        broadcast({
-          type: "policy_set",
-          agent,
-          dailyCap: dailyCap?.toString(),
-          perTxCap: perTxCap?.toString(),
-          escalationThreshold: escalationThreshold?.toString(),
-        });
+        broadcastEvent(
+          {
+            type: "policy_set",
+            agent,
+            dailyCap: dailyCap?.toString(),
+            perTxCap: perTxCap?.toString(),
+            escalationThreshold: escalationThreshold?.toString(),
+          },
+          deployment,
+        );
       },
     },
     {
@@ -68,7 +71,7 @@ export async function watchPolicyEventsFor(deployment: Deployment): Promise<void
           update: { allowed: allowed! },
         });
 
-        broadcast({ type: "allowlist_updated", agent, counterparty, allowed });
+        broadcastEvent({ type: "allowlist_updated", agent, counterparty, allowed }, deployment);
       },
     },
   ];

@@ -1,9 +1,14 @@
 import type { FastifyInstance } from "fastify";
 import type { Agent } from "@prisma/client";
+import { z } from "zod";
 import { prisma, serializeBigInts } from "../db/client.js";
 import { readAgentPolicies, readAgentPolicy, type AgentPolicySnapshot } from "../chain/policyState.js";
-import { resolveDeployment, deploymentKey } from "../chain/orgContracts.js";
-import { optionalAuth } from "../auth/clerkAuth.js";
+import { submitAsAdmin } from "../chain/signing.js";
+import { resolveDeployment, resolveDeploymentForAgent, deploymentKey } from "../chain/orgContracts.js";
+import { requireRole, optionalAuth } from "../auth/clerkAuth.js";
+import { productionGate } from "../auth/productionGate.js";
+import { ensureAgentWallet, isCircleConfigured } from "../auth/wallet.js";
+import { getCorrelationId } from "../auth/correlation.js";
 import { limitQuerySchema, paginatedQuery, cursorQuerySchema, cursorPaginatedQuery, cursorWhere, encodeCursor } from "../db/pagination.js";
 
 /// The agent set visible to a caller: the agents of the caller's resolved
@@ -118,6 +123,125 @@ export async function agentRoutes(app: FastifyInstance) {
         ...recentPayments,
         nextCursor: recentPayments.hasMore && last ? encodeCursor(last.id, last.timestamp) : null,
       },
+    });
+  });
+
+  // ── Register a new agent ──────────────────────────────────────────────
+  //
+  // Admin creates an agent by providing metadata only — no address.
+  // The backend:
+  //   1. Creates a Circle SCA wallet (the address becomes the agent's identity)
+  //   2. Registers the policy on-chain via PolicyRegistry.setPolicy
+  //   3. Stores the wallet ID and address on the agent row
+  //
+  // The Circle wallet is always created FIRST; its address is what gets
+  // registered on-chain. Never register an on-chain role for an address
+  // that doesn't already have a matching Circle-controlled wallet.
+
+  const registerAgentBody = z.object({
+    label: z.string().min(1).max(100).optional(),
+    dailyCap: z.coerce.bigint(),
+    perTxCap: z.coerce.bigint(),
+    escalationThreshold: z.coerce.bigint(),
+  }).strict().refine(
+    (data) => data.perTxCap <= data.dailyCap,
+    { message: "perTxCap must be <= dailyCap" },
+  ).refine(
+    (data) => data.escalationThreshold <= data.perTxCap,
+    { message: "escalationThreshold must be <= perTxCap" },
+  );
+
+  app.post("/agents", {
+    preHandler: [requireRole("admin"), productionGate()],
+    config: { rateLimit: { max: 10, timeWindow: "1 minute" } },
+  }, async (req, reply) => {
+    if (!req.operator) return reply.code(500).send({ error: "internal_error", message: "operator identity missing" });
+
+    const body = registerAgentBody.parse(req.body);
+
+    // Step 1: Create Circle wallet first (SCA, developer-controlled)
+    if (!isCircleConfigured()) {
+      return reply.code(503).send({
+        error: "wallet_unavailable",
+        message: "Circle wallet infrastructure not configured",
+      });
+    }
+
+    // Use a temporary address as idempotency key placeholder — the real
+    // address comes from Circle. If Circle is called twice with the same
+    // label+operator, the idempotency key prevents duplicate wallets.
+    const tempId = `pending-${req.operator.id}-${Date.now()}`;
+    let wallet;
+    try {
+      const { createAgentWallet } = await import("../auth/wallet.js");
+      wallet = await createAgentWallet(tempId, { name: body.label ?? "Agent" });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Circle wallet creation failed";
+      return reply.code(502).send({ error: "wallet_creation_failed", message: msg });
+    }
+
+    // The wallet address is the agent's on-chain identity
+    const agentAddress = wallet.address.toLowerCase();
+
+    // Step 2: Register policy on-chain
+    const deployment = await resolveDeploymentForAgent(agentAddress);
+    req.log.info({ agentAddress, dailyCap: body.dailyCap.toString(), perTxCap: body.perTxCap.toString(), escalationThreshold: body.escalationThreshold.toString() }, "Calling setPolicy on-chain");
+    let signing;
+    try {
+      signing = await submitAsAdmin(deployment, "policyRegistry", "setPolicy", [
+        agentAddress as `0x${string}`,
+        body.dailyCap,
+        body.perTxCap,
+        body.escalationThreshold,
+      ]);
+    } catch (err) {
+      // On-chain registration failed — wallet exists but agent isn't
+      // registered. The wallet is orphaned but harmless; the admin can
+      // retry with the same label to get the same wallet (idempotent).
+      req.log.error({ err, agentAddress, deployment: deployment.orgId ?? "global" }, "setPolicy on-chain registration failed");
+      const msg = err instanceof Error ? err.message : "On-chain registration failed";
+      return reply.code(502).send({ error: "chain_registration_failed", message: msg });
+    }
+
+    // Step 3: Store agent in DB with wallet info
+    const agent = await prisma.agent.create({
+      data: {
+        address: agentAddress,
+        label: body.label,
+        dailyCap: body.dailyCap,
+        perTxCap: body.perTxCap,
+        escalationThreshold: body.escalationThreshold,
+        organizationId: deployment.orgId,
+        circleWalletId: wallet.walletId,
+      },
+    });
+
+    // Record operator action for audit trail
+    await prisma.operatorAction.create({
+      data: {
+        operatorId: req.operator.id,
+        operatorLabel: req.operator.label,
+        role: req.operator.role,
+        action: "register_agent",
+        subjectId: agentAddress,
+        txHash: signing.txHash,
+        correlationId: getCorrelationId() ?? null,
+        walletAddress: req.operator.walletAddress ?? null,
+        signerAddress: signing.signer,
+        signingVia: signing.via,
+      },
+    });
+
+    return reply.code(201).send({
+      address: agent.address,
+      label: agent.label,
+      dailyCap: agent.dailyCap.toString(),
+      perTxCap: agent.perTxCap.toString(),
+      escalationThreshold: agent.escalationThreshold.toString(),
+      txHash: signing.txHash,
+      signer: signing.signer,
+      via: signing.via,
+      correlationId: req.correlationId,
     });
   });
 }

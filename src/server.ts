@@ -92,7 +92,7 @@ const allowedOrigins = new Set(
   config.CORS_ORIGIN.split(",").map((o) => o.trim()).filter(Boolean),
 );
 
-await app.register(cors, { origin: config.CORS_ORIGIN });
+await app.register(cors, { origin: config.CORS_ORIGIN, credentials: true });
 await app.register(websocket);
 await app.register(rateLimit, { max: 300, timeWindow: "1 minute" }); // Default rate limit for all routes
 

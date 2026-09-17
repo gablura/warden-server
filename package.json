@@ -11,9 +11,11 @@
     "abis:generate": "node scripts/generate-abis.mjs",
     "keys:generate": "node scripts/generate-api-keys.mjs",
     "db:migrate": "prisma migrate dev",
-    "db:studio": "prisma studio"
+    "db:studio": "prisma studio",
+    "create-wallet": "node --env-file=.env create-wallet.ts"
   },
   "dependencies": {
+    "@circle-fin/developer-controlled-wallets": "^10.8.0",
     "@clerk/backend": "^3.17.2",
     "@fastify/cors": "^10.0.0",
     "@fastify/rate-limit": "^11.2.0",
@@ -28,10 +30,10 @@
     "zod": "^3.23.8"
   },
   "devDependencies": {
-    "@types/node": "^22.7.0",
+    "@types/node": "^22.20.3",
     "@types/pg": "^8.11.10",
     "prisma": "^7.0.0",
-    "tsx": "^4.19.0",
-    "typescript": "^5.6.0"
+    "tsx": "^4.23.13",
+    "typescript": "^5.9.3"
   }
 }

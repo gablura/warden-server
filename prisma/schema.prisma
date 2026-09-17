@@ -19,6 +19,7 @@ model Agent {
   escalationThreshold BigInt   @map("escalation_threshold")
   spentToday          BigInt   @default(0) @map("spent_today")
   status              String   @default("active")
+  circleWalletId      String?  @map("circle_wallet_id")
 
   // FK index: keeps org-scoped agent lookups and the org deployment
   // resolver fast. (The index existed in the DB but was never declared here,
@@ -137,10 +138,10 @@ model Allowlist {
 /// Roles are per-organization via Membership, not global on this model.
 ///
 /// Wallet model (see src/auth/wallet.ts): every user gets exactly one
-/// embedded Circle wallet (`walletAddress`/`walletId`, both unique and
-/// nullable until provisioning completes). No seed phrase is ever shown
-/// or stored — the user authorizes via their Circle PIN/passkey through
-/// the frontend SDK. `externalWalletAddress` is an optional user-linked
+/// developer-controlled Circle wallet (`walletAddress`/`walletId`, both
+/// unique and nullable until provisioning completes). The server authorizes
+/// every wallet operation via its entity secret — end users never see a PIN
+/// or passkey prompt. `externalWalletAddress` is an optional user-linked
 /// wallet/multisig (Fireblocks, Safe) used as an add-on, never as a
 /// replacement for the embedded wallet.
 model User {

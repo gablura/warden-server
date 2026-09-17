@@ -5,7 +5,7 @@ import { isAddress } from "viem";
 import { prisma } from "../db/client.js";
 import { requireRole } from "../auth/clerkAuth.js";
 import { productionGate } from "../auth/productionGate.js";
-import { ensureUserWallet, walletStatusFor } from "../auth/wallet.js";
+import { ensureUserWallet, walletStatusFor, clearCooldown } from "../auth/wallet.js";
 import {
   INVITE_TTL_MS,
   claimPendingInvites,
@@ -127,13 +127,13 @@ export async function authRoutes(app: FastifyInstance) {
     let walletId = user.walletId;
     if (!walletAddress || !walletId) {
       try {
-        const wallet = await ensureUserWallet(user.id);
+        const wallet = await ensureUserWallet(user.id, { name: user.label ?? user.email });
         if (wallet) {
           walletAddress = wallet.address;
           walletId = wallet.walletId;
         }
-      } catch {
-        // ignore — wallet stays pending, auth still succeeds
+      } catch (err) {
+        req.log.warn({ err, userId: user.id }, "Wallet provisioning failed — will retry on next request");
       }
     }
 
@@ -173,6 +173,40 @@ export async function authRoutes(app: FastifyInstance) {
         role: m.role,
       })),
     });
+  });
+
+  // ── Manually retry wallet provisioning ─────────────────────────────
+  //
+  // When automatic wallet creation fails (e.g. 429 rate limit), this
+  // endpoint allows the user to explicitly retry. Clears the cooldown
+  // and attempts fresh wallet creation.
+  app.post("/auth/me/wallet", { preHandler: requireRole("viewer") }, async (req, reply) => {
+    const user = await prisma.user.findUnique({ where: { id: req.operator!.id } });
+    if (!user) {
+      return reply.code(401).send({ error: "unauthorized", message: "User not found" });
+    }
+
+    if (user.walletAddress && user.walletId) {
+      return reply.send({ walletAddress: user.walletAddress, walletId: user.walletId, status: "ready" });
+    }
+
+    req.log.info({ userId: user.id, walletAddress: user.walletAddress, walletId: user.walletId }, "Attempting wallet provisioning");
+
+    // Clear any existing cooldown so this manual retry always attempts Circle
+    clearCooldown(user.id);
+
+    try {
+      const wallet = await ensureUserWallet(user.id, { name: user.label ?? user.email });
+      if (wallet) {
+        req.log.info({ userId: user.id, walletAddress: wallet.address }, "Wallet provisioned successfully");
+        return reply.send({ walletAddress: wallet.address, walletId: wallet.walletId, status: "ready" });
+      }
+      req.log.warn({ userId: user.id }, "ensureUserWallet returned null");
+      return reply.send({ walletAddress: null, walletId: null, status: "unavailable" });
+    } catch (err) {
+      req.log.error({ err, userId: user.id }, "Manual wallet provisioning failed");
+      return reply.code(503).send({ error: "wallet_error", message: "Wallet creation failed. Check Circle API credentials." });
+    }
   });
 
   // ── Exchange session for scoped token (§6) ─────────────────────────

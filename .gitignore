@@ -53,3 +53,5 @@ temp/
 Thumbs.db
 WARDEN_PROJECT_BRIEF.md
 WARDEN_HARDENING_REVIEW.md
+
+create-wallet.ts

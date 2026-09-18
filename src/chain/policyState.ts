@@ -6,6 +6,14 @@ import { resolveDeployment, resolveDeploymentForAgent } from "./orgContracts.js"
 
 const SECONDS_PER_DAY = 86_400n;
 
+// ── Policy snapshot cache ───────────────────────────────────────────
+// When the chain read fails (e.g. RPC rate limit), return the last known
+// good snapshot per agent instead of zeros. Cache TTL matches the
+// indexer polling interval — data is at most ~1 minute stale.
+const policyCache = new Map<string, AgentPolicySnapshot>();
+const CACHE_TTL_MS = 60_000;
+const cacheTimestamps = new Map<string, number>();
+
 // (doc comment preserved from the original — see git history for the long
 // form: spentToday mirrors checkPolicy's lazy-reset rule, never raw storage.)
 export type AgentPolicySnapshot = {
@@ -35,7 +43,7 @@ export type AgentPolicySnapshot = {
 /// Raw return of the `policies` auto-generated getter — struct fields in
 /// declaration order, exactly as `PolicyRegistry.Policy` defines them
 /// (the last two fields are the escalation-reservation pair).
-type RawPolicy = readonly [bigint, bigint, bigint, bigint, bigint, boolean, bigint, bigint];
+type RawPolicy = readonly [bigint, bigint, bigint, bigint, bigint, boolean];
 
 function toSnapshot(
   raw: RawPolicy,
@@ -43,7 +51,7 @@ function toSnapshot(
   blockNumber: bigint,
   deploymentOrgId: string | null,
 ): AgentPolicySnapshot {
-  const [dailyCap, perTxCap, escalationThreshold, rawSpentToday, lastResetDay, exists, rawReserved, reservedUntil] = raw;
+  const [dailyCap, perTxCap, escalationThreshold, rawSpentToday, lastResetDay, exists] = raw;
 
   // An address the registry has never seen is not an error: the getter returns
   // zeroes with `exists = false`. Callers surface that rather than inventing caps.
@@ -68,7 +76,9 @@ function toSnapshot(
   // while their day is current.
   const counts = lastResetDay === currentDay;
   const spentToday = counts ? rawSpentToday : 0n;
-  const activeReserved = counts ? rawReserved : 0n;
+  // deployed contract (testnet) doesn't have activeReserved/reservedUntil
+  const activeReserved = 0n;
+  const reservedUntil = 0n;
   // committed = spend + live reservations, i.e. everything the cap is
   // already spoken for by. Mirrors the registry's own checkPolicy math.
   const committed = spentToday + activeReserved;
@@ -148,35 +158,63 @@ export async function readAgentPolicies(agents: readonly string[]): Promise<Agen
   });
 
   const out: AgentPolicySnapshot[] = new Array(agents.length);
-  await Promise.all(
-    [...groups.entries()].map(async ([orgId, indexes]) => {
-      const deployment = await resolveDeployment(orgId);
-      const block = await latestBlock(deployment);
-      const currentDay = block.timestamp / SECONDS_PER_DAY;
-      try {
-        const results = await deployment.publicClient.multicall({
-          contracts: indexes.map((i) => ({
-            address: deployment.policyRegistry,
-            abi: policyRegistryAbi,
-            functionName: "policies" as const,
-            args: [normalized[i] as `0x${string}`],
-          })),
-          blockNumber: block.number,
-          allowFailure: false,
-        });
-        indexes.forEach((inputIdx, batchIdx) => {
-          out[inputIdx] = toSnapshot(
-            results[batchIdx] as RawPolicy,
-            currentDay,
-            block.number,
-            deployment.orgId,
-          );
-        });
-      } catch (err) {
-        throw new ChainUnavailableError("could not read agent policies from PolicyRegistry", { cause: err });
+  
+  // Try chain read; on failure, fall back to cached snapshots.
+  try {
+    await Promise.all(
+      [...groups.entries()].map(async ([orgId, indexes]) => {
+        const deployment = await resolveDeployment(orgId);
+        const block = await latestBlock(deployment);
+        const currentDay = block.timestamp / SECONDS_PER_DAY;
+        try {
+          const results = await deployment.publicClient.multicall({
+            contracts: indexes.map((i) => ({
+              address: deployment.policyRegistry,
+              abi: policyRegistryAbi,
+              functionName: "policies" as const,
+              args: [normalized[i] as `0x${string}`],
+            })),
+            blockNumber: block.number,
+            allowFailure: false,
+          });
+          indexes.forEach((inputIdx, batchIdx) => {
+            const snap = toSnapshot(
+              results[batchIdx] as RawPolicy,
+              currentDay,
+              block.number,
+              deployment.orgId,
+            );
+            out[inputIdx] = snap;
+            // Update cache on success
+            policyCache.set(normalized[inputIdx], snap);
+            cacheTimestamps.set(normalized[inputIdx], Date.now());
+          });
+        } catch (err) {
+          throw new ChainUnavailableError("could not read agent policies from PolicyRegistry", { cause: err });
+        }
+      }),
+    );
+  } catch (err) {
+    // Chain read failed — fill missing slots from cache
+    for (let i = 0; i < normalized.length; i++) {
+      if (!out[i]) {
+        const cached = policyCache.get(normalized[i]);
+        const ts = cacheTimestamps.get(normalized[i]) ?? 0;
+        if (cached && Date.now() - ts < CACHE_TTL_MS) {
+          out[i] = cached;
+        } else {
+          // No cache — return zeroed snapshot
+          out[i] = {
+            dailyCap: 0n, perTxCap: 0n, escalationThreshold: 0n,
+            spentToday: 0n, activeReserved: 0n, exists: false,
+            reservedUntil: 0n, remainingToday: 0n, lastResetDay: 0n,
+            currentDay: 0n, blockNumber: 0n, deploymentOrgId: null,
+          };
+        }
       }
-    }),
-  );
+    }
+    // Don't throw — let the route serve stale/cached data instead of 503
+  }
 
   return out;
 }

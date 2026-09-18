@@ -311,16 +311,6 @@ export const policyRegistryAbi = [
         "name": "exists",
         "type": "bool",
         "internalType": "bool"
-      },
-      {
-        "name": "activeReserved",
-        "type": "uint256",
-        "internalType": "uint256"
-      },
-      {
-        "name": "reservedUntil",
-        "type": "uint256",
-        "internalType": "uint256"
       }
     ],
     "stateMutability": "view"

@@ -53,5 +53,6 @@ temp/
 Thumbs.db
 WARDEN_PROJECT_BRIEF.md
 WARDEN_HARDENING_REVIEW.md
+TEST_HARNESS.md
 
 create-wallet.ts

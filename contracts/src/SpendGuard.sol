@@ -101,6 +101,10 @@ contract SpendGuard is AccessControlLite, ReentrancyGuard {
         whenNotPaused
         returns (uint256 requestId)
     {
+        // Caller must be the agent itself (or the agent's wallet/relayer).
+        // This prevents impersonation where anyone could trigger a payment on behalf of an agent.
+        require(msg.sender == agent, "caller is not the agent");
+
         (bool allowed, bool needsApproval, string memory reason) = registry.checkPolicy(agent, counterparty, amount);
 
         if (!allowed) {

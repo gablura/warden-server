@@ -206,11 +206,12 @@ export async function executeContractAndWait(args: {
 
   const deadline = Date.now() + POLL_TIMEOUT_MS;
   for (;;) {
-    const current = (await circleFetch(`/developer/transactions/${circleTxId}`, { method: "GET" })) as CircleTxResponse;
-    const state = current.data?.state as CircleTxState | undefined;
+    const current = (await circleFetch(`/transactions/${circleTxId}`, { method: "GET" })) as CircleTxResponse;
+    const txData = current.data?.transaction ?? current.data;
+    const state = (txData?.state ?? current.data?.state) as CircleTxState | undefined;
 
     if (state === "COMPLETE") {
-      const txHash = current.data?.txHash;
+      const txHash = txData?.txHash ?? current.data?.txHash;
       if (!txHash) throw new CircleError("Circle execution COMPLETE but returned no tx hash", { retryable: false });
       return { txHash, circleTxId };
     }

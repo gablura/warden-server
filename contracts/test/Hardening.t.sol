@@ -140,12 +140,14 @@ contract HardeningTest is Test {
         policyRegistry.setAllowlist(agent, counterparty, true);
 
         // Well inside the agent's own caps; only the global ceiling limits it.
+        vm.prank(agent);
         spendGuard.requestPayment(agent, counterparty, 100 * SIX);
         (, , , uint256 spent, , , , ) = policyRegistry.policies(agent);
         assertEq(spent, 100 * SIX);
 
         // 100 spent + 100 more = 200 > 150 global: blocked even though the
         // agent's own daily cap allows 900 more.
+        vm.prank(agent);
         uint256 requestId = spendGuard.requestPayment(agent, counterparty, 100 * SIX);
         assertEq(requestId, 0, "should be blocked by the global ceiling");
         (, , , uint256 spentAfter, , , , ) = policyRegistry.policies(agent);
@@ -153,6 +155,7 @@ contract HardeningTest is Test {
 
         // Global counter resets on the UTC day boundary like per-agent ones.
         vm.warp(block.timestamp + 1 days);
+        vm.prank(agent);
         uint256 again = spendGuard.requestPayment(agent, counterparty, 100 * SIX);
         assertEq(again, 0, "resets with the day");
     }
@@ -165,6 +168,7 @@ contract HardeningTest is Test {
         policyRegistry.setPolicy(agent, 1000 * SIX, 100 * SIX, 40 * SIX);
         policyRegistry.setAllowlist(agent, counterparty, true);
 
+        vm.prank(agent);
         uint256 requestId = spendGuard.requestPayment(agent, counterparty, 60 * SIX);
         assertTrue(requestId != 0);
 
@@ -172,11 +176,11 @@ contract HardeningTest is Test {
         spendGuard.setPaused(true);
 
         // Money movement is frozen — both new and queued payments.
+        vm.expectRevert(SpendGuard.ContractPaused.selector);
         vm.prank(agent);
-        vm.expectRevert(SpendGuard.ContractPaused.selector);
         spendGuard.requestPayment(agent, counterparty, 10 * SIX);
-        vm.prank(approver);
         vm.expectRevert(SpendGuard.ContractPaused.selector);
+        vm.prank(approver);
         spendGuard.approvePending(requestId);
 
         // Rejection moves no money, so it works while paused.
@@ -188,6 +192,7 @@ contract HardeningTest is Test {
         // Unpausing restores settlement.
         vm.prank(admin);
         spendGuard.setPaused(false);
+        vm.prank(agent);
         uint256 again = spendGuard.requestPayment(agent, counterparty, 10 * SIX);
         assertEq(again, 0, "settlement resumes after unpause");
     }
@@ -272,6 +277,7 @@ contract HardeningTest is Test {
         policyRegistry.setAllowlist(agent, counterparty, true);
 
         // The first escalation reserves 60 of the 100 cap and queues.
+        vm.prank(agent);
         uint256 requestA = spendGuard.requestPayment(agent, counterparty, 60 * SIX);
         assertTrue(requestA != 0, "first escalation should reserve and queue");
 
@@ -301,6 +307,7 @@ contract HardeningTest is Test {
         policyRegistry.setPolicy(agent, 1000 * SIX, 100 * SIX, 40 * SIX);
         policyRegistry.setAllowlist(agent, counterparty, true);
 
+        vm.prank(agent);
         uint256 requestId = spendGuard.requestPayment(agent, counterparty, 60 * SIX);
 
         vm.prank(approver);

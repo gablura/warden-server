@@ -187,3 +187,73 @@ export async function submitAsApprover(args: {
     throw new ChainUnavailableError(`approval transaction ${args.functionName} failed: ${revertReason}`, { cause: err });
   }
 }
+
+/// Submit a transaction as an agent using the agent's embedded wallet via Circle.
+/// Mirrors submitAsApprover but uses the agent's wallet (from the agent table).
+export async function submitAsAgent(args: {
+  agentAddress: string;
+  deployment: Deployment;
+  functionName: "requestPayment";
+  functionSignature: "requestPayment(address,address,uint256)";
+  requestArgs: readonly [agent: `0x${string}`, counterparty: `0x${string}`, amount: bigint];
+  ensureUnresolved: () => Promise<void>;
+}): Promise<SigningResult> {
+  const { agentAddress, deployment } = args;
+
+  // Look up the agent's wallet info
+  const agent = await prisma.agent.findUnique({ where: { address: agentAddress.toLowerCase() } });
+  const walletId = agent?.circleWalletId ?? null;
+  const walletAddress = agent?.address ?? null;
+
+  const useCircle = isCircleConfigured() && !!walletId && !!walletAddress;
+
+  if (useCircle) {
+    const queue = `circle:${deployment.chainId}:${walletAddress}`;
+    try {
+      return await serializeTx(queue, async () => {
+        if (!(await readGrant(deployment, walletAddress!))) {
+          throw new GrantMissingError(walletAddress!);
+        }
+        await args.ensureUnresolved();
+        const { txHash } = await executeContractAndWait({
+          walletId: walletId!,
+          contractAddress: deployment.spendGuard,
+          abiFunctionSignature: args.functionSignature,
+          abiParameters: args.requestArgs.map((v: [`0x${string}`, `0x${string}`, bigint][number]) => v.toString()),
+        });
+        return { txHash, signer: walletAddress!, via: "circle" as const };
+      });
+    } catch (err) {
+      if (err instanceof GrantMissingError || err instanceof ChainUnavailableError) throw err;
+      recordTxFailure({ functionName: args.functionName, deployment: deploymentKey(deployment) });
+      if (err instanceof CircleError) {
+        throw new ChainUnavailableError(`agent signing via Circle failed: ${err.message}`, { cause: err });
+      }
+      throw err;
+    }
+  }
+
+  // Relayer fallback (Circle unconfigured or wallet not provisioned yet)
+  const queue = `agent:${deployment.chainId}:${walletAddress}`;
+  try {
+    const txHash = await serializeTx(queue, async () => {
+      await args.ensureUnresolved();
+      return deployment.approverWalletClient.writeContract({
+        address: deployment.spendGuard,
+        abi: spendGuardAbi,
+        functionName: "requestPayment" as const,
+        args: args.requestArgs as readonly [`0x${string}`, `0x${string}`, bigint],
+      });
+    });
+    return { txHash, signer: approverAddress, via: "relayer" };
+  } catch (err) {
+    if (err instanceof ChainUnavailableError) throw err;
+    recordTxFailure({ functionName: args.functionName, deployment: deploymentKey(deployment) });
+    const revertReason = err instanceof Error
+      ? (err as { shortMessage?: string; cause?: unknown }).shortMessage
+        ?? (err.cause instanceof Error ? err.cause.message : undefined)
+        ?? err.message
+      : String(err);
+    throw new ChainUnavailableError(`agent transaction ${args.functionName} failed: ${revertReason}`, { cause: err });
+  }
+}

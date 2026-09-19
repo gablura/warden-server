@@ -52,6 +52,7 @@ contract ReservationTest is Test {
     /// of 60 each. The second requestPayment reverts on the reservation
     /// require — no pending row, no audit entry, no approver gas spent.
     function test_Reserve_CollisionBlocksSecondEscalation() public {
+        vm.prank(agent);
         uint256 requestA = spendGuard.requestPayment(agent, counterparty, 60 * SIX);
         assertTrue(requestA != 0);
 
@@ -70,7 +71,9 @@ contract ReservationTest is Test {
     /// reservations block only genuine collisions. (Threshold is 40, so
     /// both amounts must exceed it to escalate at all; 41+50=91<=100 fits.)
     function test_Reserve_NonCollidingEscalationStillQueues() public {
+        vm.prank(agent);
         assertTrue(spendGuard.requestPayment(agent, counterparty, 41 * SIX) != 0);
+        vm.prank(agent);
         assertTrue(spendGuard.requestPayment(agent, counterparty, 50 * SIX) != 0);
 
         (, , , , , , uint256 reserved, ) = policyRegistry.policies(agent);
@@ -80,6 +83,7 @@ contract ReservationTest is Test {
     /// A small IMMEDIATE payment colliding with a live reservation is
     /// BLOCKED by checkPolicy (recorded, refused) rather than escalating.
     function test_Reserve_ImmediatePaymentBlockedByLiveReservation() public {
+        vm.prank(agent);
         assertTrue(spendGuard.requestPayment(agent, counterparty, 60 * SIX) != 0);
 
         // 50 would fit alone; with the reservation it collides (60+50>100).
@@ -98,6 +102,7 @@ contract ReservationTest is Test {
     // ------------------------------------------------------------------
 
     function test_Reserve_RejectionReleasesHeadroom() public {
+        vm.prank(agent);
         uint256 requestId = spendGuard.requestPayment(agent, counterparty, 60 * SIX);
 
         vm.prank(approver);
@@ -109,10 +114,12 @@ contract ReservationTest is Test {
         assertEq(spent, 0);
 
         // Headroom is immediately usable again.
+        vm.prank(agent);
         assertTrue(spendGuard.requestPayment(agent, counterparty, 60 * SIX) != 0);
     }
 
     function test_Reserve_ApprovalConvertsReservationIntoSpend() public {
+        vm.prank(agent);
         uint256 requestId = spendGuard.requestPayment(agent, counterparty, 60 * SIX);
 
         vm.prank(approver);
@@ -128,6 +135,7 @@ contract ReservationTest is Test {
     // ------------------------------------------------------------------
 
     function test_Reserve_DayBoundaryClearsReservation() public {
+        vm.prank(agent);
         assertTrue(spendGuard.requestPayment(agent, counterparty, 60 * SIX) != 0);
         (, , , , , , uint256 reserved, ) = policyRegistry.policies(agent);
         assertEq(reserved, 60 * SIX);
@@ -141,12 +149,14 @@ contract ReservationTest is Test {
 
         // The next mutating call (a fresh escalation) resets the stored
         // counters as part of its day-rollover handling.
+        vm.prank(agent);
         assertTrue(spendGuard.requestPayment(agent, counterparty, 60 * SIX) != 0);
         (, , , , , , uint256 reservedAfter, ) = policyRegistry.policies(agent);
         assertEq(reservedAfter, 60 * SIX, "only the new day's reservation remains");
     }
 
     function test_Reserve_TtlExpiryFreesHeadroomMidDay() public {
+        vm.prank(agent);
         assertTrue(spendGuard.requestPayment(agent, counterparty, 60 * SIX) != 0);
 
         // Same day, but past the TTL: the reservation stops counting in
@@ -158,6 +168,7 @@ contract ReservationTest is Test {
     }
 
     function test_Reserve_ExpiredReservationApprovalStillCapEnforced() public {
+        vm.prank(agent);
         uint256 requestId = spendGuard.requestPayment(agent, counterparty, 60 * SIX);
 
         // Reservations don't gate approval; recordSpend is the arbiter.
@@ -185,6 +196,7 @@ contract ReservationTest is Test {
         // Each agent reserves 100 — individually fine (own caps 100/1000),
         // but 100 + 100 > 150 global: the second is BLOCKED by the
         // reservation-aware pre-filter (recorded, no funds move).
+        vm.prank(agent);
         assertTrue(spendGuard.requestPayment(agent, counterparty, 100 * SIX) != 0);
 
         vm.prank(agent2);
@@ -216,6 +228,7 @@ contract ReservationTest is Test {
     }
 
     function test_Reserve_EmitsEvents() public {
+        vm.prank(agent);
         uint256 requestId = spendGuard.requestPayment(agent, counterparty, 60 * SIX);
 
         vm.expectEmit(true, true, true, true);

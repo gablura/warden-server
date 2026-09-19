@@ -13,6 +13,7 @@ import { auditRoutes } from "./routes/audit.js";
 import { statusRoutes } from "./routes/status.js";
 import { authRoutes } from "./routes/auth/index.js";
 import { clerkWebhookRoutes } from "./routes/webhooks.js";
+import { paymentRoutes } from "./routes/payments.js";
 import { registerClient, registerAnonymousClient } from "./ws/broadcast.js";
 import { deploymentKey, resolveDeployment } from "./chain/orgContracts.js";
 import { setAuthAlertLogger } from "./auth/failureAlert.js";
@@ -162,6 +163,7 @@ await app.register(approvalRoutes);
 await app.register(auditRoutes);
 await app.register(statusRoutes);
 await app.register(authRoutes);
+await app.register(paymentRoutes);
 
 app.get("/health", async () => ({ ok: true }));
 

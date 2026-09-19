@@ -35,15 +35,17 @@ export async function watchPaymentEventsFor(deployment: Deployment): Promise<voi
       name: watcherName("PaymentApproved"),
       eventName: "PaymentApproved",
       onLog: async ({ args, transactionHash }: ProcessableLog) => {
-        const { requestId, agent, counterparty, amount } = args as {
+        const { requestId, agent: rawAgent, counterparty: rawCounterparty, amount } = args as {
           requestId?: bigint; agent?: string; counterparty?: string; amount?: bigint;
         };
         const amt = amount ?? 0n;
+        const agent = rawAgent!.toLowerCase();
+        const counterparty = rawCounterparty!.toLowerCase();
 
         await prisma.event.create({
-          data: { agent: agent!, counterparty: counterparty!, amount: amt, decision: "approved", txHash: transactionHash },
+          data: { agent, counterparty, amount: amt, decision: "approved", txHash: transactionHash },
         });
-        await upsertAgentSpend(agent!, amt, deployment);
+        await upsertAgentSpend(agent, amt, deployment);
         // requestId is 0 for payments that settled immediately (no
         // escalation ever happened, so there's nothing pending to resolve).
         if (requestId && requestId > 0n) {
@@ -59,13 +61,15 @@ export async function watchPaymentEventsFor(deployment: Deployment): Promise<voi
       name: watcherName("PaymentBlocked"),
       eventName: "PaymentBlocked",
       onLog: async ({ args, transactionHash }: ProcessableLog) => {
-        const { agent, counterparty, amount, reason } = args as {
+        const { agent: rawAgent, counterparty: rawCounterparty, amount, reason } = args as {
           agent?: string; counterparty?: string; amount?: bigint; reason?: string;
         };
         const amt = amount ?? 0n;
+        const agent = rawAgent!.toLowerCase();
+        const counterparty = rawCounterparty!.toLowerCase();
 
         await prisma.event.create({
-          data: { agent: agent!, counterparty: counterparty!, amount: amt, decision: `blocked: ${reason}`, txHash: transactionHash },
+          data: { agent, counterparty, amount: amt, decision: `blocked: ${reason}`, txHash: transactionHash },
         });
         broadcastEvent({ type: "payment_blocked", agent, counterparty, amount: amt.toString(), reason }, deployment);
       },
@@ -74,13 +78,15 @@ export async function watchPaymentEventsFor(deployment: Deployment): Promise<voi
       name: watcherName("PaymentEscalated"),
       eventName: "PaymentEscalated",
       onLog: async ({ args, transactionHash }: ProcessableLog) => {
-        const { requestId, agent, counterparty, amount } = args as {
+        const { requestId, agent: rawAgent, counterparty: rawCounterparty, amount } = args as {
           requestId?: bigint; agent?: string; counterparty?: string; amount?: bigint;
         };
         const amt = amount ?? 0n;
+        const agent = rawAgent!.toLowerCase();
+        const counterparty = rawCounterparty!.toLowerCase();
 
         await prisma.event.create({
-          data: { agent: agent!, counterparty: counterparty!, amount: amt, decision: "escalated", txHash: transactionHash },
+          data: { agent, counterparty, amount: amt, decision: "escalated", txHash: transactionHash },
         });
         await prisma.pendingRequest.upsert({
           where: {
@@ -89,8 +95,8 @@ export async function watchPaymentEventsFor(deployment: Deployment): Promise<voi
           create: {
             deploymentKey: key,
             requestId: requestId!,
-            agent: agent!,
-            counterparty: counterparty!,
+            agent,
+            counterparty,
             amount: amt,
             resolved: false,
           },

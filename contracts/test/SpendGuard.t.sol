@@ -106,6 +106,7 @@ contract SpendGuardTest is Test {
     // Test the approve branch (payment under threshold, allowlisted, within caps)
     function test_ApproveBranch_SmallPayment() public {
         uint256 amount = 25 * 10**6; // Below escalation threshold
+        vm.prank(agent);
         uint256 requestId = spendGuard.requestPayment(agent, counterparty, amount);
 
         assertEq(requestId, 0); // Should return 0 for immediate approval
@@ -120,6 +121,7 @@ contract SpendGuardTest is Test {
 
     function test_ApproveBranch_ExactlyAtThreshold() public {
         uint256 amount = 50 * 10**6; // Exactly at threshold (should escalate, not approve)
+        vm.prank(agent);
         uint256 requestId = spendGuard.requestPayment(agent, counterparty, amount);
 
         assertEq(requestId, 0); // Should escalate, not approve immediately
@@ -129,6 +131,7 @@ contract SpendGuardTest is Test {
     function test_BlockBranch_NoPolicy() public {
         address unknownAgent = address(0x999);
         uint256 amount = 25 * 10**6;
+        vm.prank(unknownAgent);
         uint256 requestId = spendGuard.requestPayment(unknownAgent, counterparty, amount);
 
         assertEq(requestId, 0); // Should return 0 for blocked payments
@@ -140,6 +143,7 @@ contract SpendGuardTest is Test {
     function test_BlockBranch_NotAllowlisted() public {
         address unknownCounterparty = address(0x999);
         uint256 amount = 25 * 10**6;
+        vm.prank(agent);
         uint256 requestId = spendGuard.requestPayment(agent, unknownCounterparty, amount);
 
         assertEq(requestId, 0); // Should return 0 for blocked payments
@@ -150,6 +154,7 @@ contract SpendGuardTest is Test {
 
     function test_BlockBranch_ExceedsPerTxCap() public {
         uint256 amount = 150 * 10**6; // Exceeds per-tx cap of 100
+        vm.prank(agent);
         uint256 requestId = spendGuard.requestPayment(agent, counterparty, amount);
 
         assertEq(requestId, 0); // Should return 0 for blocked payments
@@ -165,6 +170,7 @@ contract SpendGuardTest is Test {
 
     // Try to spend 150 (exceeds daily cap)
     uint256 amount = 150 * 10**6;
+    vm.prank(agent);
     uint256 requestId = spendGuard.requestPayment(
         agent,
         counterparty,
@@ -179,6 +185,7 @@ contract SpendGuardTest is Test {
     // Test the escalate branch (payment above threshold)
     function test_EscalateBranch_AboveThreshold() public {
         uint256 amount = 75 * 10**6; // Above escalation threshold
+        vm.prank(agent);
         uint256 requestId = spendGuard.requestPayment(agent, counterparty, amount);
 
         assertGt(requestId, 0); // Should return non-zero requestId
@@ -196,10 +203,12 @@ contract SpendGuardTest is Test {
 
     function test_EscalateBranch_MultipleEscalations() public {
         uint256 amount1 = 75 * 10**6;
+        vm.prank(agent);
         uint256 requestId1 = spendGuard.requestPayment(agent, counterparty, amount1);
         assertGt(requestId1, 0);
 
         uint256 amount2 = 80 * 10**6;
+        vm.prank(agent);
         uint256 requestId2 = spendGuard.requestPayment(agent, counterparty, amount2);
         assertGt(requestId2, 0);
         assertEq(requestId2, requestId1 + 1); // Should increment
@@ -211,6 +220,7 @@ contract SpendGuardTest is Test {
     // Test approval of escalated requests
     function test_ApprovePending() public {
         uint256 amount = 75 * 10**6;
+        vm.prank(agent);
         uint256 requestId = spendGuard.requestPayment(agent, counterparty, amount);
         assertGt(requestId, 0);
 
@@ -232,6 +242,7 @@ contract SpendGuardTest is Test {
 
     function test_ApprovePending_RevertWhen_AlreadyResolved() public {
         uint256 amount = 75 * 10**6;
+        vm.prank(agent);
         uint256 requestId = spendGuard.requestPayment(agent, counterparty, amount);
 
         vm.prank(approver);
@@ -245,6 +256,7 @@ contract SpendGuardTest is Test {
 
     function test_ApprovePending_RevertWhen_NotApprover() public {
         uint256 amount = 75 * 10**6;
+        vm.prank(agent);
         uint256 requestId = spendGuard.requestPayment(agent, counterparty, amount);
 
         vm.prank(address(0x999));
@@ -255,6 +267,7 @@ contract SpendGuardTest is Test {
     // Test rejection of escalated requests
     function test_RejectPending() public {
         uint256 amount = 75 * 10**6;
+        vm.prank(agent);
         uint256 requestId = spendGuard.requestPayment(agent, counterparty, amount);
         assertGt(requestId, 0);
 
@@ -276,6 +289,7 @@ contract SpendGuardTest is Test {
 
     function test_RejectPending_RevertWhen_AlreadyResolved() public {
         uint256 amount = 75 * 10**6;
+        vm.prank(agent);
         uint256 requestId = spendGuard.requestPayment(agent, counterparty, amount);
 
         vm.prank(approver);
@@ -289,6 +303,7 @@ contract SpendGuardTest is Test {
 
     function test_RejectPending_RevertWhen_NotApprover() public {
         uint256 amount = 75 * 10**6;
+        vm.prank(agent);
         uint256 requestId = spendGuard.requestPayment(agent, counterparty, amount);
 
         vm.prank(address(0x999));
@@ -307,6 +322,7 @@ contract SpendGuardTest is Test {
     // 800 + 75 <= daily cap (1000)
     uint256 amount = 75 * 10**6;
 
+    vm.prank(agent);
     uint256 requestId = spendGuard.requestPayment(
         agent,
         counterparty,
@@ -338,6 +354,7 @@ contract SpendGuardTest is Test {
         vm.expectEmit(true, true, true, true);
         emit SpendGuard.PaymentApproved(0, agent, counterparty, amount);
         
+        vm.prank(agent);
         spendGuard.requestPayment(agent, counterparty, amount);
     }
 
@@ -348,6 +365,7 @@ contract SpendGuardTest is Test {
         vm.expectEmit(true, true, false, true);
         emit SpendGuard.PaymentBlocked(unknownAgent, counterparty, amount, "no policy for agent");
         
+        vm.prank(unknownAgent);
         spendGuard.requestPayment(unknownAgent, counterparty, amount);
     }
 
@@ -358,11 +376,13 @@ contract SpendGuardTest is Test {
         vm.expectEmit(true, true, true, true);
         emit SpendGuard.PaymentEscalated(expectedRequestId, agent, counterparty, amount);
         
+        vm.prank(agent);
         spendGuard.requestPayment(agent, counterparty, amount);
     }
 
     function test_Events_PendingApproved() public {
         uint256 amount = 75 * 10**6;
+        vm.prank(agent);
         uint256 requestId = spendGuard.requestPayment(agent, counterparty, amount);
         
         vm.expectEmit(true, false, false, false);
@@ -374,6 +394,7 @@ contract SpendGuardTest is Test {
 
     function test_Events_PendingRejected() public {
         uint256 amount = 75 * 10**6;
+        vm.prank(agent);
         uint256 requestId = spendGuard.requestPayment(agent, counterparty, amount);
         
         vm.expectEmit(true, false, false, false);
@@ -389,6 +410,7 @@ contract SpendGuardTest is Test {
         uint256 amount = 25 * 10**6;
         uint256 agentBalanceBefore = usdc.balanceOf(agent);
 
+        vm.prank(agent);
         spendGuard.requestPayment(agent, counterparty, amount);
 
         assertEq(usdc.balanceOf(counterparty), amount);
@@ -399,6 +421,7 @@ contract SpendGuardTest is Test {
         uint256 amount = 75 * 10**6;
         uint256 agentBalanceBefore = usdc.balanceOf(agent);
 
+        vm.prank(agent);
         uint256 requestId = spendGuard.requestPayment(agent, counterparty, amount);
 
         // Escalated: nothing settled yet
@@ -416,6 +439,7 @@ contract SpendGuardTest is Test {
         uint256 amount = 75 * 10**6;
         uint256 agentBalanceBefore = usdc.balanceOf(agent);
 
+        vm.prank(agent);
         uint256 requestId = spendGuard.requestPayment(agent, counterparty, amount);
 
         vm.prank(approver);
@@ -429,6 +453,7 @@ contract SpendGuardTest is Test {
         uint256 amount = 25 * 10**6;
         address unknownCounterparty = address(0x999);
 
+        vm.prank(agent);
         spendGuard.requestPayment(agent, unknownCounterparty, amount);
 
         assertEq(usdc.balanceOf(unknownCounterparty), 0);
@@ -440,6 +465,7 @@ contract SpendGuardTest is Test {
         usdc.approve(address(spendGuard), 0);
 
         vm.expectRevert("MockUSDC: insufficient allowance");
+        vm.prank(agent);
         spendGuard.requestPayment(agent, counterparty, 25 * 10**6);
 
         // Fail-closed: the failed transfer reverted the whole request, so
@@ -457,6 +483,7 @@ contract SpendGuardTest is Test {
         usdc.approve(address(spendGuard), type(uint256).max);
 
         vm.expectRevert("MockUSDC: insufficient balance");
+        vm.prank(poorAgent);
         spendGuard.requestPayment(poorAgent, counterparty, 25 * 10**6);
 
         assertEq(usdc.balanceOf(counterparty), 0);
@@ -467,8 +494,20 @@ contract SpendGuardTest is Test {
         vm.prank(agent);
         usdc.approve(address(spendGuard), 100 * 10**6);
 
+        vm.prank(agent);
         spendGuard.requestPayment(agent, counterparty, amount);
 
         assertEq(usdc.allowance(agent, address(spendGuard)), 60 * 10**6);
+    }
+
+    // Test the new caller validation: requestPayment must be called by the agent itself
+    function test_RequestPayment_RevertWhen_CallerNotAgent() public {
+        uint256 amount = 25 * 10**6;
+        address notAgent = address(0x999);
+
+        // Calling requestPayment from a different address should revert
+        vm.prank(notAgent);
+        vm.expectRevert("caller is not the agent");
+        spendGuard.requestPayment(agent, counterparty, amount);
     }
 }

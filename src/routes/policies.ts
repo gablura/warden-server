@@ -2,6 +2,7 @@ import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { isAddress } from "viem";
 import { submitAsAdmin } from "../chain/signing.js";
+import { readAgentPolicy } from "../chain/policyState.js";
 import { resolveDeploymentForAgent } from "../chain/orgContracts.js";
 import { prisma } from "../db/client.js";
 import { requireRole } from "../auth/clerkAuth.js";
@@ -16,6 +17,13 @@ const setPolicyBody = z.object({
   perTxCap: z.coerce.bigint(),
   escalationThreshold: z.coerce.bigint(),
 }).strict();
+
+// Both cap fields zero is the "Pause" gesture: it makes every future payment
+// attempt fail the per-tx check immediately (there is no paused flag on
+// PolicyRegistry — see AGENTS_APPROVALS_AUDIT_OVERVIEW.md). The dailyCap
+// guard below deliberately does not apply to it: pausing an agent that has
+// already spent today is exactly the point.
+const isPause = (body: { dailyCap: bigint; perTxCap: bigint }) => body.dailyCap === 0n && body.perTxCap === 0n;
 
 const setAllowlistBody = z.object({
   agent: addressField,
@@ -66,6 +74,23 @@ export async function policyRoutes(app: FastifyInstance) {
   app.post("/policies", gasSpendingRoute, async (req, reply) => {
     if (!req.operator) return reply.code(500).send({ error: "internal_error", message: "operator identity missing" });
     const body = setPolicyBody.parse(req.body);
+
+    // Fail fast before wasting gas: lowering dailyCap below what the agent
+    // has already spent today would either revert unhelpfully or succeed
+    // into a nonsensical "over cap" state (see AGENTS_APPROVALS_AUDIT_
+    // OVERVIEW.md). The live snapshot is the same reservation-aware read
+    // the agent list uses. Exempt: the zero/zero "Pause" gesture — pausing
+    // an agent that already spent today is exactly the point.
+    if (!isPause(body)) {
+      const policy = await readAgentPolicy(body.agent);
+      if (policy.exists && body.dailyCap < policy.spentToday) {
+        return reply.code(422).send({
+          error: "daily_cap_below_spent",
+          message: `dailyCap (${body.dailyCap}) is below the agent's spentToday (${policy.spentToday}) — wait for the daily reset or pause the agent instead`,
+        });
+      }
+    }
+
     const deployment = await resolveDeploymentForAgent(body.agent);
     const signing = await submitAsAdmin(deployment, "policyRegistry", "setPolicy", [
       body.agent as `0x${string}`, body.dailyCap, body.perTxCap, body.escalationThreshold,

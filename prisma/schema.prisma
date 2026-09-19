@@ -29,6 +29,9 @@ model Agent {
   updatedAt           DateTime @updatedAt @map("updated_at")
 
   organization Organization? @relation(fields: [organizationId], references: [id])
+  /// Audit-trail rows for this agent (payments, escalations, blocks). Read
+  /// for the agent list's lastActivityAt and the passport's recent activity.
+  events Event[]
 
   @@map("agents")
 }
@@ -36,6 +39,8 @@ model Agent {
 model Event {
   id           Int      @id @default(autoincrement())
   agent        String
+  /// Relation to the agent row — same address, lowercase (see Agent.events).
+  agentRef     Agent?   @relation(fields: [agent], references: [address], onUpdate: Restrict, onDelete: Restrict)
   counterparty String
   amount       BigInt
   decision     String
@@ -61,10 +66,20 @@ model PendingRequest {
   amount        BigInt
   resolved      Boolean  @default(false)
   createdAt     DateTime @default(now()) @map("created_at")
+  /// When the request's escalation reservation expires on-chain
+  /// (RESERVATION_TTL after escalation). Stamped from the SpendReserved
+  /// event the indexer mirrors; rows indexed before this column existed
+  /// have no value, and the expiry sweeper falls back to createdAt +
+  /// RESERVATION_TTL (see indexer/expirePendingRequests.ts). A pending
+  /// request past this point is auto-rejected with an explicit reason
+  /// instead of silently losing its reservation while staying "pending".
+  expiresAt     DateTime? @map("expires_at")
 
   @@id([deploymentKey, requestId])
   @@index([deploymentKey, resolved])
   @@index([deploymentKey, resolved, createdAt])
+  /// The expiry sweeper's query: unresolved requests past their window.
+  @@index([resolved, expiresAt])
   @@map("pending_requests")
 }
 

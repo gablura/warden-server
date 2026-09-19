@@ -7,7 +7,7 @@ import { submitAsAdmin } from "../chain/signing.js";
 import { resolveDeployment, resolveDeploymentForAgent, deploymentKey } from "../chain/orgContracts.js";
 import { requireRole, optionalAuth } from "../auth/clerkAuth.js";
 import { productionGate } from "../auth/productionGate.js";
-import { ensureAgentWallet, isCircleConfigured } from "../auth/wallet.js";
+import { ensureAgentWallet, createAgentWallet, isCircleConfigured } from "../auth/wallet.js";
 import { getCorrelationId } from "../auth/correlation.js";
 import { limitQuerySchema, paginatedQuery, cursorQuerySchema, cursorPaginatedQuery, cursorWhere, encodeCursor } from "../db/pagination.js";
 
@@ -65,11 +65,25 @@ export async function agentRoutes(app: FastifyInstance) {
     const { limit } = limitQuerySchema.parse(req.query);
 
     const result = await paginatedQuery(
-      async (take) => prisma.agent.findMany({ where: await scopedAgentWhere(req.operator?.orgId), take }),
+      async (take) =>
+        prisma.agent.findMany({
+          where: await scopedAgentWhere(req.operator?.orgId),
+          take,
+        }),
       limit,
     );
 
     const policies = await readAgentPolicies(result.data.map((agent) => normalizeAddress(agent.address)));
+
+    // Last activity per agent, straight from the events table (indexed by
+    // agent). One grouped query for the whole page — no per-agent lookup.
+    const addresses = result.data.map((agent) => normalizeAddress(agent.address));
+    const lastActivity = await prisma.event.groupBy({
+      by: ["agent"],
+      where: { agent: { in: addresses } },
+      _max: { timestamp: true },
+    });
+    const lastActivityByAgent = new Map(lastActivity.map((r) => [r.agent, r._max.timestamp]));
 
     const enriched = result.data.map((agent, index) => {
       const policy = withLivePolicy(agent, policies[index]!);
@@ -78,7 +92,12 @@ export async function agentRoutes(app: FastifyInstance) {
       // imminent spend the flag exists to surface.
       const committed = policy.spentToday + policy.activeReserved;
       const spentPct = policy.dailyCap > 0n ? Number((committed * 100n) / policy.dailyCap) : 0;
-      return { ...policy, nearCap: spentPct >= 80 };
+      return {
+        ...policy,
+        nearCap: spentPct >= 80,
+        // Audit-trail freshness for the agent table's "Last activity" column.
+        lastActivityAt: lastActivityByAgent.get(normalizeAddress(agent.address)) ?? null,
+      };
     });
 
     // Sorted on live spend — the old `orderBy: { spentToday: "desc" }` sorted on
@@ -103,7 +122,7 @@ export async function agentRoutes(app: FastifyInstance) {
 
     // Fail-closed: if the chain read rejects, the whole request 503s (see the
     // error handler in server.ts) rather than answering with indexed values.
-    const [policy, recentPayments] = await Promise.all([
+    const [policy, recentPayments, allowlist] = await Promise.all([
       readAgentPolicy(address),
       cursorPaginatedQuery(
         (take, cursor) =>
@@ -114,6 +133,15 @@ export async function agentRoutes(app: FastifyInstance) {
           }),
         req.query,
       ),
+      // Allowlist editor data: the indexer mirrors AllowlistUpdated events
+      // into this table, so the passport renders the same list the chain
+      // enforces. Disallowed entries are kept (allowed: false) — they are
+      // the record of a past decision and the editor lets an admin flip
+      // them back on without retyping the address.
+      prisma.allowlist.findMany({
+        where: { agent: address },
+        orderBy: { counterparty: "asc" },
+      }),
     ]);
 
     const last = recentPayments.data[recentPayments.data.length - 1];
@@ -123,6 +151,7 @@ export async function agentRoutes(app: FastifyInstance) {
         ...recentPayments,
         nextCursor: recentPayments.hasMore && last ? encodeCursor(last.id, last.timestamp) : null,
       },
+      allowlist,
     });
   });
 
@@ -159,7 +188,10 @@ export async function agentRoutes(app: FastifyInstance) {
 
     const body = registerAgentBody.parse(req.body);
 
-    // Step 1: Create Circle wallet first (SCA, developer-controlled)
+    // Step 1: Create Circle wallet first (SCA, developer-controlled) — the
+    // returned address IS the agent's on-chain identity. setPolicy below is
+    // keyed to that address; an admin never supplies one by hand (see
+    // CIRCLE_WALLET_SETUP_PROMPT.md Step 4's sequencing rule).
     if (!isCircleConfigured()) {
       return reply.code(503).send({
         error: "wallet_unavailable",
@@ -167,13 +199,13 @@ export async function agentRoutes(app: FastifyInstance) {
       });
     }
 
-    // Use a temporary address as idempotency key placeholder — the real
-    // address comes from Circle. If Circle is called twice with the same
-    // label+operator, the idempotency key prevents duplicate wallets.
-    const tempId = `pending-${req.operator.id}-${Date.now()}`;
+    // Idempotency: a stable key derived from the operator + agent label, so
+    // retrying this request after a network error cannot mint a second
+    // wallet for the same agent (mirrors the login-provisioning rule in
+    // CIRCLE_WALLET_SETUP_PROMPT.md Step 3).
+    const tempId = `${req.operator.id}:${body.label ?? "agent"}`;
     let wallet;
     try {
-      const { createAgentWallet } = await import("../auth/wallet.js");
       wallet = await createAgentWallet(tempId, { name: body.label ?? "Agent" });
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Circle wallet creation failed";

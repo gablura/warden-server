@@ -19,6 +19,7 @@ import { setAuthAlertLogger } from "./auth/failureAlert.js";
 import { runIndexerLeadership } from "./indexer/leader.js";
 import { watchPaymentEvents } from "./indexer/watchPaymentEvents.js";
 import { watchPolicyEvents } from "./indexer/watchPolicyEvents.js";
+import { startExpirySweeper } from "./indexer/expirePendingRequests.js";
 
 // The error handler receives `unknown` in Fastify 5, so narrow it explicitly
 // rather than trusting the shape of a thrown value.
@@ -179,6 +180,10 @@ runIndexerLeadership(async () => {
   // Each watcher backfills from its persisted checkpoint before going
   // live, so a restart resumes instead of skipping events.
   await Promise.all([watchPaymentEvents(), watchPolicyEvents()]);
+  // Expiry handling rides the same leadership lock: exactly one replica
+  // runs the sweeper, so an expired request is auto-rejected once, with
+  // one audit row and one broadcast (see indexer/expirePendingRequests.ts).
+  startExpirySweeper(app.log);
   app.log.info("Chain event indexers started successfully (this instance holds the indexer lock)");
 }, app.log).catch((err) => {
   app.log.error({ err }, "Indexer leadership loop failed unexpectedly");

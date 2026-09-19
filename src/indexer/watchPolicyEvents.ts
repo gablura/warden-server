@@ -90,6 +90,67 @@ export async function watchPolicyEventsFor(deployment: Deployment): Promise<void
         broadcastEvent({ type: "allowlist_updated", agent, counterparty, allowed }, deployment);
       },
     },
+    {
+      // Escalation-time reservation (SpendGuard.requestPayment →
+      // PolicyRegistry.reserve). Two bookkeeping jobs:
+      //   1. Stamp PendingRequest.expiresAt so the expiry sweeper
+      //      (indexer/expirePendingRequests.ts) rejects the request
+      //      explicitly when its window lapses instead of leaving it
+      //      ambiguously "pending" while its reservation silently lapses.
+      //   2. Broadcast so live dashboards can move activeReserved/hold
+      //      indicators without a poll.
+      name: watcherName("SpendReserved"),
+      eventName: "SpendReserved",
+      onLog: async ({ args }: ProcessableLog) => {
+        const { requestId, agent, amount, expiresAt } = args as {
+          requestId?: bigint; agent?: string; amount?: bigint; expiresAt?: bigint;
+        };
+
+        if (requestId !== undefined) {
+          await prisma.pendingRequest.updateMany({
+            where: { deploymentKey: key, requestId },
+            data: {
+              expiresAt: expiresAt !== undefined ? new Date(Number(expiresAt) * 1000) : null,
+            },
+          });
+        }
+
+        broadcastEvent(
+          {
+            type: "spend_reserved",
+            requestId: requestId?.toString(),
+            agent,
+            amount: amount?.toString(),
+            expiresAt: expiresAt?.toString(),
+          },
+          deployment,
+        );
+      },
+    },
+    {
+      // Reservation released (SpendGuard.approvePending/rejectPending both
+      // release before settling/refusing). Purely informational — the
+      // approval_resolved broadcast carries the state change — but keeping
+      // the release on the feed lets the dashboard's reservation readouts
+      // drop without waiting for the next chain poll.
+      name: watcherName("SpendReservationReleased"),
+      eventName: "SpendReservationReleased",
+      onLog: async ({ args }: ProcessableLog) => {
+        const { requestId, agent, amount } = args as {
+          requestId?: bigint; agent?: string; amount?: bigint;
+        };
+
+        broadcastEvent(
+          {
+            type: "spend_reservation_released",
+            requestId: requestId?.toString(),
+            agent,
+            amount: amount?.toString(),
+          },
+          deployment,
+        );
+      },
+    },
   ];
 
   await Promise.all(

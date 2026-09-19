@@ -6,6 +6,13 @@ import { config } from "../config.js";
 import { arcTransport } from "./client.js";
 import { prisma } from "../db/client.js";
 
+/// Mirrors PolicyRegistry.RESERVATION_TTL (7 days). Lives here — next to
+/// the deployment/contract plumbing — rather than in the ABI file so both
+/// the indexer (stamping expiresAt from SpendReserved) and the expiry
+/// sweeper (fallback for rows without a stamp) share one constant. Update
+/// together with the contract if the TTL ever changes.
+export const RESERVATION_TTL_SECONDS = 7 * 24 * 60 * 60;
+
 // ── Per-org contract addressing (§7) ─────────────────────────────────
 //
 // Every verified org may own a full deployment (3 contracts + RPC + chain

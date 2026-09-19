@@ -183,16 +183,20 @@ export async function approvalRoutes(app: FastifyInstance) {
     const staleRead = indexerLag !== null && indexerLag > 0;
 
     // Make the daily-cap collision visible before anyone clicks approve.
-    // On-chain, an escalated request now RESERVES its headroom at escalation
-    // time (PolicyRegistry.reserve) — two escalations that individually fit
-    // but collectively don't collide at escalation time, so a queued request
-    // is over-cap only when circumstances changed after queueing (a day
-    // boundary, reservation TTL expiry, or a cap decrease, which applies
-    // immediately). wouldFitNow therefore mirrors the exact gate an approval
-    // must pass — recordSpend's `spentToday + amount <= dailyCap`, evaluated
-    // with live chain values; remainingToday is already reservation-aware
-    // (see policyState.ts). Live caps/spend come from the same multicall
-    // path /agents uses.
+    // On-chain, an escalated request RESERVES its headroom at escalation
+    // time (PolicyRegistry.reserve) and the reservation converts into real
+    // spend at approval (approvePending releases, then recordSpend).
+    // "Would this still fit" is therefore a question about the agent's
+    // total committed headroom — spend plus all live reservations — not
+    // about this request in isolation: approving it merely converts its
+    // own reservation into spend, so the amount cancels out of the
+    // inequality and `committed <= dailyCap` is the exact state
+    // recordSpend's require enforces once this request's reservation is
+    // released. It stops fitting when circumstances changed after
+    // queueing: a cap decrease (applies immediately), direct unescalated
+    // spend, or expiry handling freeing the reservation. Both sides come
+    // from the same reservation-aware chain snapshot (see policyState.ts)
+    // — the old spentToday-only check ignored reservations entirely.
     const agents = [...new Set(result.data.map((r) => r.agent))];
     const policies = await readAgentPolicies(agents);
     const policyByAgent = new Map(agents.map((agent, i) => [agent, policies[i]!]));
@@ -205,7 +209,7 @@ export async function approvalRoutes(app: FastifyInstance) {
         policyExists: policy.exists,
         // False can mean "doesn't fit" *or* "policy unreadable" — the
         // exists/policySource flags distinguish the two for clients.
-        wouldFitNow: policy.exists && policy.spentToday + request.amount <= policy.dailyCap,
+        wouldFitNow: policy.exists && policy.spentToday + policy.activeReserved <= policy.dailyCap,
       };
     });
 

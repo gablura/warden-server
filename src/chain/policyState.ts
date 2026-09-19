@@ -14,6 +14,15 @@ const policyCache = new Map<string, AgentPolicySnapshot>();
 const CACHE_TTL_MS = 60_000;
 const cacheTimestamps = new Map<string, number>();
 
+/// Evict a single agent's cached snapshot (e.g. after setPolicy confirms).
+/// Call this with the agent's normalized address so subsequent reads hit
+/// the chain immediately instead of waiting for TTL expiry.
+export function evictPolicyCache(agentAddress: string): void {
+  const key = agentAddress.toLowerCase();
+  policyCache.delete(key);
+  cacheTimestamps.delete(key);
+}
+
 // (doc comment preserved from the original — see git history for the long
 // form: spentToday mirrors checkPolicy's lazy-reset rule, never raw storage.)
 export type AgentPolicySnapshot = {
@@ -310,4 +319,43 @@ export async function readAgentPolicies(agents: readonly string[]): Promise<Agen
   }
 
   return out;
+}
+
+/// Read the pending policy change for an agent (if any).
+/// Returns the scheduled change with effectiveAt, or null if none pending.
+export type PendingPolicySnapshot = {
+  dailyCap: bigint;
+  perTxCap: bigint;
+  escalationThreshold: bigint;
+  effectiveAt: bigint; // Unix timestamp when the change becomes effective
+} | null;
+
+export async function readPendingPolicy(
+  agent: string,
+  deploymentOrOrgId?: Deployment | string | null,
+): Promise<PendingPolicySnapshot> {
+  const deployment = typeof deploymentOrOrgId === "object" && deploymentOrOrgId !== null
+    ? deploymentOrOrgId
+    : await resolveDeployment(deploymentOrOrgId ?? null);
+
+  // The pendingPolicy getter exists on all builds that have the timelock feature
+  // (same builds that have RESERVATION_TTL). Use the main ABI.
+  try {
+    const result = await deployment.publicClient.readContract({
+      address: deployment.policyRegistry,
+      abi: policyRegistryAbi,
+      functionName: "pendingPolicy",
+      args: [agent as `0x${string}`],
+    }) as readonly [bigint, bigint, bigint, bigint];
+
+    const [dailyCap, perTxCap, escalationThreshold, effectiveAt] = result;
+
+    // effectiveAt = 0 means no pending change
+    if (effectiveAt === 0n) return null;
+
+    return { dailyCap, perTxCap, escalationThreshold, effectiveAt };
+  } catch {
+    // If the getter doesn't exist (older build), no pending changes possible
+    return null;
+  }
 }

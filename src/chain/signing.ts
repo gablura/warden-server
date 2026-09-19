@@ -84,7 +84,13 @@ export async function submitAsAdmin(
     // A submission failure — as opposed to a route/validation failure — is
     // exactly what monitoring should surface (hardening review §5.2).
     recordTxFailure({ functionName, deployment: deploymentKey(deployment) });
-    throw new ChainUnavailableError(`admin transaction ${functionName} failed`, { cause: err });
+    // Extract revert reason from viem error if available
+    const revertReason = err instanceof Error
+      ? (err as { shortMessage?: string; cause?: unknown }).shortMessage
+        ?? (err.cause instanceof Error ? err.cause.message : undefined)
+        ?? err.message
+      : String(err);
+    throw new ChainUnavailableError(`admin transaction ${functionName} failed: ${revertReason}`, { cause: err });
   }
 }
 
@@ -173,6 +179,11 @@ export async function submitAsApprover(args: {
   } catch (err) {
     if (err instanceof ChainUnavailableError) throw err;
     recordTxFailure({ functionName: args.functionName, deployment: deploymentKey(deployment) });
-    throw new ChainUnavailableError(`approval transaction ${args.functionName} failed`, { cause: err });
+    const revertReason = err instanceof Error
+      ? (err as { shortMessage?: string; cause?: unknown }).shortMessage
+        ?? (err.cause instanceof Error ? err.cause.message : undefined)
+        ?? err.message
+      : String(err);
+    throw new ChainUnavailableError(`approval transaction ${args.functionName} failed: ${revertReason}`, { cause: err });
   }
 }

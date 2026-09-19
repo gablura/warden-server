@@ -2,8 +2,8 @@ import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { isAddress } from "viem";
 import { submitAsAdmin } from "../chain/signing.js";
-import { readAgentPolicy } from "../chain/policyState.js";
-import { resolveDeploymentForAgent } from "../chain/orgContracts.js";
+import { readAgentPolicy, evictPolicyCache, readPendingPolicy } from "../chain/policyState.js";
+import { resolveDeploymentForAgent, resolveDeployment } from "../chain/orgContracts.js";
 import { prisma } from "../db/client.js";
 import { requireRole } from "../auth/clerkAuth.js";
 import { productionGate } from "../auth/productionGate.js";
@@ -96,6 +96,9 @@ export async function policyRoutes(app: FastifyInstance) {
       body.agent as `0x${string}`, body.dailyCap, body.perTxCap, body.escalationThreshold,
     ]);
     await recordOperatorAction(req.operator, "set_policy", body.agent.toLowerCase(), signing);
+    // Bust the chain-read cache so the next GET /agents/:address reads fresh
+    // policy from the chain instead of serving the 60s TTL cached snapshot.
+    evictPolicyCache(body.agent);
     return reply.send({ txHash: signing.txHash, signer: signing.signer, via: signing.via, correlationId: req.correlationId });
   });
 
@@ -108,5 +111,51 @@ export async function policyRoutes(app: FastifyInstance) {
     ]);
     await recordOperatorAction(req.operator, "set_allowlist", `${body.agent.toLowerCase()}:${body.counterparty.toLowerCase()}`, signing);
     return reply.send({ txHash: signing.txHash, signer: signing.signer, via: signing.via, correlationId: req.correlationId });
+  });
+
+  // Apply a scheduled policy increase (admin-only, gas-spending).
+  // Only callable after the CAP_CHANGE_DELAY has elapsed (effectiveAt <= now).
+  // Reads the pending change first to give a clear error if none exists or not yet effective.
+  app.post("/policies/apply-pending", gasSpendingRoute, async (req, reply) => {
+    if (!req.operator) return reply.code(500).send({ error: "internal_error", message: "operator identity missing" });
+    const body = z.object({ agent: addressField }).strict().parse(req.body);
+
+    const deployment = await resolveDeploymentForAgent(body.agent);
+    const pending = await readPendingPolicy(body.agent, deployment);
+    if (!pending) {
+      return reply.code(404).send({ error: "not_found", message: "No scheduled policy change for this agent" });
+    }
+    const now = BigInt(Math.floor(Date.now() / 1000));
+    if (pending.effectiveAt > now) {
+      return reply.code(400).send({
+        error: "not_ready",
+        message: `Policy change not yet effective — wait until ${new Date(Number(pending.effectiveAt) * 1000).toISOString()}`,
+      });
+    }
+
+    const signing = await submitAsAdmin(deployment, "policyRegistry", "applyPolicy", [body.agent as `0x${string}`]);
+    await recordOperatorAction(req.operator, "apply_pending_policy", body.agent.toLowerCase(), signing);
+    // Bust cache so the new caps are visible immediately
+    evictPolicyCache(body.agent);
+    return reply.send({ txHash: signing.txHash, signer: signing.signer, via: signing.via, correlationId: req.correlationId });
+  });
+
+  // Read the pending policy change for an agent (if any).
+  // Admin or viewer can call; useful for the UI to show "pending increase" badge.
+  app.get<{ Params: { agent: string } }>("/policies/pending/:agent", { preHandler: requireRole("viewer") }, async (req, reply) => {
+    const agent = req.params.agent.toLowerCase();
+    const deployment = await resolveDeploymentForAgent(agent);
+    const pending = await readPendingPolicy(agent, deployment);
+    if (!pending) return reply.send({ pending: null });
+    return reply.send({
+      pending: {
+        dailyCap: pending.dailyCap.toString(),
+        perTxCap: pending.perTxCap.toString(),
+        escalationThreshold: pending.escalationThreshold.toString(),
+        effectiveAt: pending.effectiveAt.toString(),
+        effectiveAtIso: new Date(Number(pending.effectiveAt) * 1000).toISOString(),
+        isReady: pending.effectiveAt <= BigInt(Math.floor(Date.now() / 1000)),
+      },
+    });
   });
 }

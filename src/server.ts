@@ -11,7 +11,7 @@ import { policyRoutes } from "./routes/policies.js";
 import { approvalRoutes } from "./routes/approvals.js";
 import { auditRoutes } from "./routes/audit.js";
 import { statusRoutes } from "./routes/status.js";
-import { authRoutes } from "./routes/auth.js";
+import { authRoutes } from "./routes/auth/index.js";
 import { clerkWebhookRoutes } from "./routes/webhooks.js";
 import { registerClient, registerAnonymousClient } from "./ws/broadcast.js";
 import { deploymentKey, resolveDeployment } from "./chain/orgContracts.js";

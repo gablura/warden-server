@@ -106,8 +106,14 @@ export async function paymentRoutes(app: FastifyInstance) {
           }
         }
 
-        await prisma.pendingRequest.create({
-          data: {
+        await prisma.pendingRequest.upsert({
+          where: {
+            deploymentKey_requestId: {
+              deploymentKey: deployment.orgId ?? "global",
+              requestId: onChainRequestId,
+            },
+          },
+          create: {
             deploymentKey: deployment.orgId ?? "global",
             requestId: onChainRequestId,
             agent: body.agent.toLowerCase(),
@@ -115,6 +121,7 @@ export async function paymentRoutes(app: FastifyInstance) {
             amount: body.amount,
             resolved: false,
           },
+          update: {},
         });
 
         return reply.send({
